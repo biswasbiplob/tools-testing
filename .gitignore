@@ -169,3 +169,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Virtual environments
+.venv
+
+# MLflow
+mlruns/
+
+# DVC
+.dvc/

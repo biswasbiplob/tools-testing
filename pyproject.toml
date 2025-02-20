@@ -1,0 +1,17 @@
+[project]
+name = "tools-testing"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.36.3",
+    "dvc[s3]>=3.59.0",
+    "mlflow>=2.20.1",
+    "virtualenv>=20.29.2",
+]
+
+[dependency-groups]
+airflow = [
+    "duckdb>=1.1.3",
+]
