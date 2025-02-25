@@ -2,7 +2,7 @@ import os
 
 import mlflow
 
-model_uri = "runs:/32d65cb2143b4618b5b32baefe51e295/sklearn-model"
+model_uri = "runs:/a02e7c5201a144929b12bfd8a0d885a6/sklearn-model"
 
 os.environ["MLFLOW_TRACKING_USERNAME"] = "<username>"
 os.environ["MLFLOW_TRACKING_PASSWORD"] = "<password>"

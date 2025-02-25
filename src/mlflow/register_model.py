@@ -18,7 +18,7 @@ mlflow.set_tracking_uri(
 )
 
 # Create or get existing experiment with S3 artifact location
-experiment_name = "demo-basic-setup"
+experiment_name = "demo-mlops"
 try:
     experiment_id = mlflow.create_experiment(
         experiment_name,
@@ -36,7 +36,7 @@ with mlflow.start_run() as run:
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
-    params = {"max_depth": 2, "random_state": 42}
+    params = {"max_depth": 7, "random_state": 42}
     model = RandomForestRegressor(**params)
     model.fit(X_train, y_train)
 
@@ -53,5 +53,6 @@ with mlflow.start_run() as run:
         sk_model=model,
         artifact_path="sklearn-model",
         signature=signature,
+        input_example=X_train,
         registered_model_name="sk-learn-random-forest-reg-model",
     )
