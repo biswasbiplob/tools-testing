@@ -1,7 +1,14 @@
+import os
+
 import mlflow
 
-model_uri = 'runs:/b0cfd1a5df5c40ef8965f51b7998ec92/sklearn-model'
-mlflow.set_tracking_uri('http://127.0.0.1:5000')
+model_uri = "runs:/32d65cb2143b4618b5b32baefe51e295/sklearn-model"
+
+os.environ["MLFLOW_TRACKING_USERNAME"] = "<username>"
+os.environ["MLFLOW_TRACKING_PASSWORD"] = "<password>"
+mlflow.set_tracking_uri(
+    "http://k8s-mlflowpo-mlflowtr-81106c8fd7-8274e91cf06e46f8.elb.eu-west-1.amazonaws.com"
+)
 
 # This is the input example logged with the model
 pyfunc_model = mlflow.pyfunc.load_model(model_uri)
