@@ -4,20 +4,41 @@ Thank you for your interest in contributing! This document provides guidelines a
 
 ## Development Setup
 
+### Using uv (Recommended - Fast!)
+
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd athena-sql-optimizer
 
+# Install all dependencies (creates .venv automatically)
+uv sync
+
+# Activate the virtual environment (optional, uv run works without this)
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Or run commands directly with uv (no activation needed)
+uv run pytest tests/
+uv run python examples/test_analyzer.py
+uv run black src/
+uv run ruff check src/
+```
+
+**Why uv?**
+- ⚡ 10-100x faster than pip
+- 🔒 Deterministic dependency resolution
+- 📦 Automatic virtual environment management
+- 🎯 Production-ready lock files
+
+### Using pip (Alternative)
+
+```bash
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install in development mode
 pip install -e .
-
-# Install development dependencies
-pip install -r requirements.txt
 ```
 
 ## Architecture Overview
@@ -301,13 +322,44 @@ def test_my_analyzer():
 Run tests:
 
 ```bash
+# Using uv (recommended)
+uv run pytest tests/
+
+# With verbose output
+uv run pytest tests/ -v
+
+# Specific test file
+uv run pytest tests/unit/test_analyzers.py -v
+
+# Alternative: traditional pytest (after activating venv)
 pytest tests/
 ```
 
 ## Code Style
 
-- Use Black for formatting: `black src/`
-- Use Ruff for linting: `ruff check src/`
+### Formatting and Linting
+
+```bash
+# Format code with Black (using uv)
+uv run black src/
+
+# Check formatting without changes
+uv run black --check src/
+
+# Lint with Ruff
+uv run ruff check src/
+
+# Auto-fix with Ruff
+uv run ruff check --fix src/
+
+# Type check with mypy
+uv run mypy src/
+```
+
+### Style Guidelines
+
+- Use Black for formatting (line length: 100)
+- Use Ruff for linting
 - Use type hints for all function parameters and returns
 - Follow PEP 8 naming conventions
 - Write docstrings for all public functions and classes

@@ -1,7 +1,7 @@
 """Recommendation engine that orchestrates analyzers and computes optimizations."""
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .models import (
@@ -137,21 +137,26 @@ class OptimizationEngine:
             if rec.savings_usd:
                 total_savings += rec.savings_usd
 
-        # Calculate savings based on percentages if direct costs not available
-        if total_current_cost == 0 and context.get("query_metrics"):
+        # Calculate cost from metrics if available
+        if context.get("query_metrics"):
             metrics = context["query_metrics"]
             data_scanned_tb = metrics.data_scanned_bytes / (1024 ** 4)
-            total_current_cost = data_scanned_tb * self.config.athena_cost_per_tb
+            metrics_based_cost = data_scanned_tb * self.config.athena_cost_per_tb
 
-            # Calculate potential optimized cost based on recommendations
-            max_savings_percentage = 0.0
-            for rec in sorted_recommendations:
-                if rec.savings_percentage and rec.savings_percentage > max_savings_percentage:
-                    max_savings_percentage = rec.savings_percentage
+            # Use metrics-based cost if we don't have cost from recommendations
+            if total_current_cost == 0:
+                total_current_cost = metrics_based_cost
 
-            if max_savings_percentage > 0:
-                total_optimized_cost = total_current_cost * (1 - max_savings_percentage / 100)
-                total_savings = total_current_cost - total_optimized_cost
+            # Calculate potential optimized cost based on recommendation percentages
+            if total_current_cost > 0 and total_optimized_cost == 0:
+                max_savings_percentage = 0.0
+                for rec in sorted_recommendations:
+                    if rec.savings_percentage and rec.savings_percentage > max_savings_percentage:
+                        max_savings_percentage = rec.savings_percentage
+
+                if max_savings_percentage > 0:
+                    total_optimized_cost = total_current_cost * (1 - max_savings_percentage / 100)
+                    total_savings = total_current_cost - total_optimized_cost
 
         total_savings_percentage = (
             (total_savings / total_current_cost * 100)
@@ -169,7 +174,7 @@ class OptimizationEngine:
             total_optimized_cost_usd=total_optimized_cost,
             total_savings_usd=total_savings,
             total_savings_percentage=total_savings_percentage,
-            analysis_timestamp=datetime.utcnow().isoformat(),
+            analysis_timestamp=datetime.now(timezone.utc).isoformat(),
             config={
                 "region": self.config.region,
                 "workgroup": self.config.workgroup,
@@ -343,6 +348,9 @@ class OptimizationEngine:
             return "AVRO"
         elif "json" in format_lower:
             return "JSON"
+        # Check for CSV first (TextInputFormat is commonly used for CSV)
+        elif input_format == "org.apache.hadoop.mapred.TextInputFormat":
+            return "CSV"
         elif "text" in format_lower:
             return "TEXT"
         else:

@@ -33,17 +33,39 @@ A comprehensive Model Context Protocol (MCP) server that analyzes AWS Athena SQL
 - Modular collectors for AWS services
 - Configurable recommendation scoring
 
+## 📚 Documentation
+
+- **[Getting Started Guide](docs/guides/GETTING_STARTED.md)** - Quick start and usage examples
+- **[Architecture Documentation](docs/ARCHITECTURE.md)** - System design and components
+- **[Flow Diagrams](docs/FLOW_DIAGRAM.md)** - Visual workflow documentation
+- **[Contributing Guide](CONTRIBUTING.md)** - How to extend the optimizer
+
 ## Installation
+
+### Prerequisites
+
+- **Python 3.10+**
+- **uv** (recommended) - Modern, fast Python package manager
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+### Quick Install with uv
 
 ```bash
 # Clone the repository
 cd athena-sql-optimizer
 
-# Install dependencies
-pip install -e .
+# Install all dependencies (creates venv automatically)
+uv sync
 
-# Or install from requirements
-pip install -r requirements.txt
+# The project is now ready to use!
+```
+
+### Alternative: Install with pip
+
+```bash
+pip install -e .
 ```
 
 ## Configuration
@@ -322,6 +344,53 @@ The AWS profile/credentials must have the following permissions:
     }
   ]
 }
+```
+
+## Testing
+
+The project includes comprehensive test coverage with 73 tests covering all components.
+
+### Run All Tests
+
+```bash
+# Using uv (recommended)
+uv run pytest tests/ -v
+
+# Quick run
+uv run pytest tests/ -q
+
+# With coverage
+uv run pytest tests/ --cov=athena_optimizer --cov-report=html
+```
+
+### Run Specific Test Suites
+
+```bash
+# Unit tests only
+uv run pytest tests/unit/ -v
+
+# Integration tests only
+uv run pytest tests/integration/ -v
+
+# Specific test file
+uv run pytest tests/unit/test_analyzers.py -v
+
+# Specific test
+uv run pytest tests/unit/test_analyzers.py::TestCostAnalyzer::test_high_cost_detection -v
+```
+
+### Test Structure
+
+```
+tests/
+├── conftest.py          # Shared fixtures
+├── unit/                # Unit tests with mocking
+│   ├── test_models.py
+│   ├── test_analyzers.py
+│   ├── test_collectors.py
+│   └── test_engine.py
+└── integration/         # End-to-end tests
+    └── test_end_to_end.py
 ```
 
 ## Troubleshooting

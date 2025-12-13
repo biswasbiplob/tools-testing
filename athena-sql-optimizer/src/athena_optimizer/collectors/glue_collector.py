@@ -143,10 +143,11 @@ class GlueCollector:
             return "AVRO"
         elif "json" in format_lower:
             return "JSON"
-        elif "textinput" in format_lower or "textoutput" in format_lower.lower():
-            return "TEXT"
+        # Check exact match first before partial matches
         elif input_format == "org.apache.hadoop.mapred.TextInputFormat":
             return "CSV"
+        elif "textinput" in format_lower or "textoutput" in format_lower:
+            return "TEXT"
         else:
             return "UNKNOWN"
 
