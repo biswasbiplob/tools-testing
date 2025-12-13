@@ -1,6 +1,5 @@
 """Decorators for MCP tools and other utilities."""
 
-import json
 import functools
 from typing import Callable, Any
 
@@ -11,13 +10,12 @@ logger = get_logger(__name__)
 
 def mcp_tool_handler(func: Callable) -> Callable:
     """
-    Decorator for MCP tools that handles errors and JSON serialization.
+    Decorator for MCP tools that handles Pydantic model serialization and logging.
 
     This decorator:
-    - Catches exceptions and returns formatted error JSON
-    - Logs errors with structured logging
-    - Serializes results to JSON with proper formatting
-    - Includes function arguments in error responses for debugging
+    - Converts Pydantic models to dictionaries
+    - Logs tool execution with structured logging
+    - Lets FastMCP handle errors and JSON serialization naturally
 
     Usage:
         @mcp.tool()
@@ -28,38 +26,21 @@ def mcp_tool_handler(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> str:
-        try:
-            result = func(*args, **kwargs)
+    def wrapper(*args: Any, **kwargs: Any) -> dict:
+        # Log tool invocation
+        logger.debug(
+            "mcp_tool_invoked",
+            tool_name=func.__name__,
+            **kwargs
+        )
 
-            # Handle Pydantic models
-            if hasattr(result, "model_dump"):
-                result = result.model_dump()
+        result = func(*args, **kwargs)
 
-            # Return JSON formatted result
-            return json.dumps(result, indent=2, default=str)
+        # Handle Pydantic models - convert to dict
+        if hasattr(result, "model_dump"):
+            result = result.model_dump()
 
-        except Exception as e:
-            # Get function signature for error context
-            func_name = func.__name__
-
-            # Build error context with function arguments
-            error_context = {
-                "error": str(e),
-                "status": "failed",
-            }
-
-            # Add all kwargs to error context
-            error_context.update(kwargs)
-
-            # Log the error with context
-            logger.error(
-                "mcp_tool_failed",
-                tool_name=func_name,
-                error=str(e),
-                **kwargs
-            )
-
-            return json.dumps(error_context, indent=2)
+        # Return dict - FastMCP will handle JSON serialization
+        return result
 
     return wrapper

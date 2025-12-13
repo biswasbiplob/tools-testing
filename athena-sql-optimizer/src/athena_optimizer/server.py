@@ -1,7 +1,7 @@
 """FastMCP server for Athena SQL optimization."""
 
 import json
-import threading
+import os
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
@@ -18,90 +18,100 @@ logger = get_logger(__name__)
 mcp = FastMCP("athena-sql-optimizer")
 
 
-# Thread-local storage for engine instances
-_thread_local = threading.local()
+# Global engine instance (initialized on startup)
+_engine: Optional[OptimizationEngine] = None
 
 
 def get_engine() -> OptimizationEngine:
     """
-    Get the optimization engine for the current thread.
+    Get the optimization engine instance.
 
     Returns:
-        OptimizationEngine instance for this thread
+        OptimizationEngine instance
 
     Raises:
-        RuntimeError: If engine not initialized for this thread
+        RuntimeError: If engine not initialized
     """
-    engine = getattr(_thread_local, "engine", None)
-    if engine is None:
+    if _engine is None:
         raise RuntimeError(
             "Optimizer not initialized. Please check your MCP configuration."
         )
-    return engine
+    return _engine
 
 
-def initialize_engine(
-    aws_profile: Optional[str] = None,
-    region: str = "eu-west-1",
-    workgroup: Optional[str] = None,
-    s3_output_location: Optional[str] = None,
-    catalog: str = "AwsDataCatalog",
-    database: Optional[str] = None,
-    run_explain_analyze: bool = False,
-    athena_cost_per_tb: float = 5.0,
-    timeout_seconds: int = 300
-) -> None:
+def _create_config_from_env() -> OptimizerConfig:
     """
-    Initialize the optimization engine with configuration for the current thread.
+    Create optimizer configuration from environment variables.
 
-    This function creates a thread-local engine instance, ensuring thread-safety
-    in multi-threaded environments.
-
-    Args:
-        aws_profile: AWS credentials profile name
-        region: AWS region (default: eu-west-1)
-        workgroup: Athena workgroup name (required)
-        s3_output_location: S3 location for query results (required)
-        catalog: Glue catalog name (default: AwsDataCatalog)
-        database: Default database name
-        run_explain_analyze: Whether to run EXPLAIN ANALYZE by default
-        athena_cost_per_tb: Cost per TB of data scanned (default: 5.0 USD)
-        timeout_seconds: Query timeout in seconds (default: 300)
+    Returns:
+        OptimizerConfig instance
 
     Raises:
-        ConfigurationError: If required parameters are missing
+        ConfigurationError: If required environment variables are missing
     """
-    # Validate required parameters
+    workgroup = os.getenv("ATHENA_WORKGROUP")
+    s3_output = os.getenv("ATHENA_S3_OUTPUT")
+
     if not workgroup:
         raise ConfigurationError(
-            "workgroup parameter is required",
-            details={"parameter": "workgroup"}
+            "ATHENA_WORKGROUP environment variable is required",
+            details={"variable": "ATHENA_WORKGROUP"}
         )
-    if not s3_output_location:
+    if not s3_output:
         raise ConfigurationError(
-            "s3_output_location parameter is required",
-            details={"parameter": "s3_output_location"}
+            "ATHENA_S3_OUTPUT environment variable is required",
+            details={"variable": "ATHENA_S3_OUTPUT"}
         )
 
-    config = OptimizerConfig(
-        aws_profile=aws_profile,
-        region=region,
+    return OptimizerConfig(
+        aws_profile=os.getenv("AWS_PROFILE"),
+        region=os.getenv("AWS_REGION", "eu-west-1"),
         workgroup=workgroup,
-        s3_output_location=s3_output_location,
-        catalog=catalog,
-        database=database,
-        run_explain_analyze=run_explain_analyze,
-        athena_cost_per_tb=athena_cost_per_tb,
-        timeout_seconds=timeout_seconds
+        s3_output_location=s3_output,
+        catalog=os.getenv("ATHENA_CATALOG", "AwsDataCatalog"),
+        database=os.getenv("ATHENA_DATABASE"),
+        run_explain_analyze=os.getenv("RUN_EXPLAIN_ANALYZE", "false").lower() == "true",
+        athena_cost_per_tb=float(os.getenv("ATHENA_COST_PER_TB", "5.0")),
+        timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "300"))
     )
 
-    _thread_local.engine = OptimizationEngine(config)
-    logger.info(
-        "engine_initialized",
-        region=region,
-        workgroup=workgroup,
-        database=database,
-    )
+
+@mcp.on_startup()
+async def startup():
+    """Initialize the optimization engine when MCP server starts."""
+    global _engine
+
+    try:
+        config = _create_config_from_env()
+        _engine = OptimizationEngine(config)
+        logger.info(
+            "mcp_server_started",
+            region=config.region,
+            workgroup=config.workgroup,
+            database=config.database,
+        )
+    except Exception as e:
+        logger.error(
+            "mcp_server_startup_failed",
+            error=str(e),
+            required_vars=["ATHENA_WORKGROUP", "ATHENA_S3_OUTPUT"],
+        )
+        raise
+
+
+@mcp.on_shutdown()
+async def shutdown():
+    """Clean up resources when MCP server stops."""
+    global _engine
+
+    if _engine is not None:
+        try:
+            _engine.close()
+            logger.info("mcp_server_stopped")
+        except Exception as e:
+            logger.error("mcp_server_shutdown_error", error=str(e))
+        finally:
+            _engine = None
 
 
 @mcp.tool()
@@ -184,45 +194,24 @@ def check_table_health(
     return engine.check_table_health(database, table)
 
 
-# Allow initialization via environment or config
 def main():
-    """Main entry point for the MCP server."""
-    import os
-    import sys
+    """
+    Main entry point for the MCP server.
 
-    # Check if config is provided via command line
-    if len(sys.argv) > 1:
-        # Expect JSON config as first argument
-        try:
-            config_json = sys.argv[1]
-            config_dict = json.loads(config_json)
-            initialize_engine(**config_dict)
-        except Exception as e:
-            logger.error("failed_to_parse_config", error=str(e))
-            sys.exit(1)
-    else:
-        # Try to initialize from environment variables
-        try:
-            initialize_engine(
-                aws_profile=os.getenv("AWS_PROFILE"),
-                region=os.getenv("AWS_REGION", "eu-west-1"),
-                workgroup=os.getenv("ATHENA_WORKGROUP"),
-                s3_output_location=os.getenv("ATHENA_S3_OUTPUT"),
-                catalog=os.getenv("ATHENA_CATALOG", "AwsDataCatalog"),
-                database=os.getenv("ATHENA_DATABASE"),
-                run_explain_analyze=os.getenv("RUN_EXPLAIN_ANALYZE", "false").lower() == "true",
-                athena_cost_per_tb=float(os.getenv("ATHENA_COST_PER_TB", "5.0")),
-                timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "300"))
-            )
-        except Exception as e:
-            logger.error(
-                "failed_to_initialize_from_environment",
-                error=str(e),
-                required_vars=["ATHENA_WORKGROUP", "ATHENA_S3_OUTPUT"],
-            )
-            sys.exit(1)
+    The server will initialize from environment variables using the
+    @mcp.on_startup() hook. Required environment variables:
+    - ATHENA_WORKGROUP: Athena workgroup name
+    - ATHENA_S3_OUTPUT: S3 output location for query results
 
-    # Run the MCP server
+    Optional environment variables:
+    - AWS_PROFILE: AWS profile name
+    - AWS_REGION: AWS region (default: eu-west-1)
+    - ATHENA_CATALOG: Glue catalog name (default: AwsDataCatalog)
+    - ATHENA_DATABASE: Default database name
+    - RUN_EXPLAIN_ANALYZE: Run EXPLAIN ANALYZE (default: false)
+    - ATHENA_COST_PER_TB: Cost per TB in USD (default: 5.0)
+    - TIMEOUT_SECONDS: Query timeout (default: 300)
+    """
     mcp.run()
 
 
