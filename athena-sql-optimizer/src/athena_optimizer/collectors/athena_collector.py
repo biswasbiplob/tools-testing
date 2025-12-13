@@ -153,7 +153,11 @@ class AthenaCollector(BaseCollector):
             return all_rows
 
         except ClientError as e:
-            raise RuntimeError(f"Failed to get query results: {e}") from e
+            raise QueryExecutionError(
+                query_execution_id,
+                f"Failed to get query results: {e}",
+                details={"error": str(e), "error_code": e.response["Error"]["Code"]}
+            ) from e
 
     def get_explain_plan(self, query: str, database: Optional[str] = None) -> str:
         """Get EXPLAIN plan for a query."""

@@ -1,13 +1,16 @@
 """Recommendation engine that orchestrates analyzers and computes optimizations."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, TypeVar, Callable, Dict, List
+from functools import partial
 
 from .logging import get_logger
 from .sql_parser import extract_table_names
 from .cost_calculator import CostCalculator
 from .metrics import get_metrics_collector
 from .parallel import execute_parallel
+
+T = TypeVar('T')
 from .constants import (
     DEFAULT_MAX_PARTITIONS,
     SEVERITY_ORDER_CRITICAL,
@@ -82,6 +85,64 @@ class OptimizationEngine:
         except:
             pass  # Ignore errors in __del__
 
+    def _collect_parallel_with_logging(
+        self,
+        items: List[str],
+        fetch_func: Callable[[str], T],
+        resource_type: str,
+        log_failures: bool = True
+    ) -> Dict[str, T]:
+        """
+        Execute parallel collection with unified error handling and logging.
+
+        This helper eliminates code duplication for parallel collection patterns
+        throughout the engine. It handles task creation, parallel execution,
+        error logging, and result aggregation.
+
+        Args:
+            items: List of items to process in parallel
+            fetch_func: Function to fetch/process each item
+            resource_type: Type name for logging (e.g., "table_metadata")
+            log_failures: Whether to log failures as warnings
+
+        Returns:
+            Dictionary mapping items to successful results (failures omitted)
+        """
+        if not items:
+            return {}
+
+        # Create tasks using functools.partial (no lambda anti-pattern)
+        tasks = {
+            item: partial(fetch_func, item)
+            for item in items
+        }
+
+        # Execute in parallel
+        results = execute_parallel(tasks, fail_fast=False)
+
+        # Process results with unified error handling
+        successful_results = {}
+        for item, result in results.items():
+            if isinstance(result, Exception):
+                if log_failures:
+                    logger.warning(
+                        f"failed_to_fetch_{resource_type}",
+                        item=item,
+                        error=str(result),
+                        error_type=type(result).__name__
+                    )
+            elif result is not None:
+                successful_results[item] = result
+
+        logger.debug(
+            f"{resource_type}_collection_complete",
+            total=len(items),
+            succeeded=len(successful_results),
+            failed=len(items) - len(successful_results)
+        )
+
+        return successful_results
+
     def analyze_query(
         self,
         query: str,
@@ -121,40 +182,24 @@ class OptimizationEngine:
             # Extract table names from query using proper SQL parsing
             table_names = extract_table_names(query)
 
-            # Collect table metadata in parallel for better performance
-            if table_names:
-                def fetch_metadata(table_name: str):
-                    """Fetch metadata for a single table."""
-                    # Handle database.table notation
-                    if "." in table_name:
-                        table_db, table = table_name.split(".", 1)
-                    else:
-                        table_db, table = db, table_name
+            # Collect table metadata in parallel using helper
+            def fetch_metadata(table_name: str):
+                """Fetch metadata for a single table."""
+                # Handle database.table notation
+                if "." in table_name:
+                    table_db, table = table_name.split(".", 1)
+                else:
+                    table_db, table = db, table_name
 
-                    if table_db:
-                        return self.glue.get_table_metadata(table_db, table)
-                    return None
+                if table_db:
+                    return self.glue.get_table_metadata(table_db, table)
+                return None
 
-                # Create parallel tasks for each table
-                metadata_tasks = {
-                    table_name: lambda tn=table_name: fetch_metadata(tn)
-                    for table_name in table_names
-                }
-
-                # Execute metadata fetches in parallel
-                metadata_results = execute_parallel(metadata_tasks, fail_fast=False)
-
-                # Process results and handle errors
-                for table_name, result in metadata_results.items():
-                    if isinstance(result, Exception):
-                        # Table might not exist or access denied - log and continue
-                        logger.warning(
-                            "failed_to_fetch_table_metadata",
-                            table_name=table_name,
-                            error=str(result),
-                        )
-                    elif result is not None:
-                        context["table_metadata"][table_name] = result
+            context["table_metadata"] = self._collect_parallel_with_logging(
+                table_names,
+                fetch_metadata,
+                "table_metadata"
+            )
 
             # Get EXPLAIN plan and optionally EXPLAIN ANALYZE in parallel
             should_run_analyze = (
@@ -163,12 +208,15 @@ class OptimizationEngine:
                 else self.config.run_explain_analyze
             )
 
-            # Build tasks for parallel execution
-            explain_tasks = {}
-            explain_tasks["explain_plan"] = lambda: self.athena.get_explain_plan(query, db)
+            # Build tasks for parallel execution using partial (no lambda)
+            explain_tasks = {
+                "explain_plan": partial(self.athena.get_explain_plan, query, db)
+            }
 
             if should_run_analyze:
-                explain_tasks["explain_analyze"] = lambda: self.athena.get_explain_analyze_plan(query, db)
+                explain_tasks["explain_analyze"] = partial(
+                    self.athena.get_explain_analyze_plan, query, db
+                )
 
             # Execute EXPLAIN queries in parallel
             explain_results = execute_parallel(explain_tasks, fail_fast=False)
@@ -277,39 +325,29 @@ class OptimizationEngine:
         db = database or self.config.database
         table_names = extract_table_names(query)
 
-        table_sizes = {}
+        # Fetch table statistics in parallel using helper
+        def fetch_stats(table_name: str):
+            """Fetch statistics for a single table."""
+            try:
+                if "." in table_name:
+                    table_db, table = table_name.split(".", 1)
+                else:
+                    table_db, table = db, table_name
 
-        # Fetch table statistics in parallel
-        if table_names:
-            def fetch_stats(table_name: str):
-                """Fetch statistics for a single table."""
-                try:
-                    if "." in table_name:
-                        table_db, table = table_name.split(".", 1)
-                    else:
-                        table_db, table = db, table_name
+                if table_db:
+                    stats = self.glue.get_table_statistics(table_db, table)
+                    return int(stats.get("total_size", 0))
+            except Exception:
+                # Could not get size, skip
+                pass
+            return 0
 
-                    if table_db:
-                        stats = self.glue.get_table_statistics(table_db, table)
-                        return int(stats.get("total_size", 0))
-                except Exception:
-                    # Could not get size, skip
-                    pass
-                return 0
-
-            # Create parallel tasks
-            stats_tasks = {
-                table_name: lambda tn=table_name: fetch_stats(tn)
-                for table_name in table_names
-            }
-
-            # Execute in parallel
-            stats_results = execute_parallel(stats_tasks, fail_fast=False)
-
-            # Collect results
-            for table_name, result in stats_results.items():
-                if not isinstance(result, Exception) and result:
-                    table_sizes[table_name] = result
+        table_sizes = self._collect_parallel_with_logging(
+            table_names,
+            fetch_stats,
+            "table_statistics",
+            log_failures=False  # Don't log failures for cost estimation
+        )
 
         # Use cost calculator to estimate costs
         cost_estimate = self.cost_calculator.estimate_cost_from_table_sizes(table_sizes)

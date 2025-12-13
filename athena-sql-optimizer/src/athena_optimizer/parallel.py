@@ -115,6 +115,9 @@ def execute_parallel_map(
     """
     Apply a function to items in parallel using a thread pool.
 
+    This is a simpler, more Pythonic implementation using ThreadPoolExecutor
+    directly instead of routing through execute_parallel.
+
     Args:
         items: List of items to process
         func: Function to apply to each item
@@ -122,7 +125,8 @@ def execute_parallel_map(
         fail_fast: If True, stop on first error
 
     Returns:
-        List of results in the same order as input items
+        List of results in the same order as input items.
+        If fail_fast=False, exceptions are returned in place of results.
 
     Example:
         tables = ['table1', 'table2', 'table3']
@@ -134,23 +138,44 @@ def execute_parallel_map(
     if not items:
         return []
 
-    # Create tasks dictionary with indexed names
-    tasks = {
-        f"item_{i}": lambda item=item: func(item)
-        for i, item in enumerate(items)
-    }
+    workers = max_workers or get_default_workers()
+    workers = min(workers, len(items))
 
-    # Execute in parallel
-    results_dict = execute_parallel(tasks, max_workers, fail_fast)
+    logger.debug(
+        "parallel_map_started",
+        num_items=len(items),
+        max_workers=workers
+    )
 
-    # Return results in original order
-    ordered_results = []
-    for i in range(len(items)):
-        result = results_dict.get(f"item_{i}")
-        if isinstance(result, Exception):
-            if fail_fast:
-                raise result
-            # Include exception in results if not fail_fast
-        ordered_results.append(result)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        if fail_fast:
+            # Use executor.map for immediate exception propagation
+            try:
+                results = list(executor.map(func, items))
+                logger.debug("parallel_map_completed", num_items=len(results))
+                return results
+            except Exception as e:
+                logger.warning("parallel_map_failed_fast", error=str(e))
+                raise
+        else:
+            # Submit all items and collect results/exceptions gracefully
+            futures = {executor.submit(func, item): i for i, item in enumerate(items)}
+            results = [None] * len(items)
 
-    return ordered_results
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as e:
+                    results[index] = e
+                    logger.debug("parallel_map_item_failed", index=index, error=str(e))
+
+            num_succeeded = sum(1 for r in results if not isinstance(r, Exception))
+            logger.debug(
+                "parallel_map_completed",
+                total=len(results),
+                succeeded=num_succeeded,
+                failed=len(results) - num_succeeded
+            )
+
+            return results
