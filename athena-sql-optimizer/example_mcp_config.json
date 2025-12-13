@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "athena-optimizer": {
+      "command": "python",
+      "args": [
+        "-m",
+        "athena_optimizer.server"
+      ],
+      "env": {
+        "AWS_PROFILE": "default",
+        "AWS_REGION": "eu-west-1",
+        "ATHENA_WORKGROUP": "primary",
+        "ATHENA_S3_OUTPUT": "s3://my-bucket/athena-results/",
+        "ATHENA_CATALOG": "AwsDataCatalog",
+        "ATHENA_DATABASE": "my_database",
+        "RUN_EXPLAIN_ANALYZE": "false",
+        "ATHENA_COST_PER_TB": "5.0",
+        "TIMEOUT_SECONDS": "300"
+      }
+    }
+  }
+}
