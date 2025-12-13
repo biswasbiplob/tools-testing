@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, TypeVar, Callable, Dict, List
 from functools import partial
 
-from .logging import get_logger
+from .logging import get_logger, logging_context
 from .sql_parser import extract_table_names
 from .cost_calculator import CostCalculator
 from .metrics import get_metrics_collector
@@ -169,140 +169,149 @@ class OptimizationEngine:
 
         try:
             db = database or self.config.database
+            query_id = abs(hash(query)) % 10000  # Short ID for log correlation
 
-            # Initialize context for analyzers
-            context = {
-                "query": query,
-                "database": db,
-                "table_metadata": {},
-                "query_metrics": None,
-                "explain_plan": None,
-                "explain_analyze_plan": None,
-            }
+            # Use logging context to automatically include database and query_id in all logs
+            with logging_context(database=db, query_id=query_id):
+                logger.info("query_analysis_started", table_count=query.count("FROM"))
 
-            # Extract table names from query using proper SQL parsing
-            table_names = extract_table_names(query)
+                # Initialize context for analyzers
+                context = {
+                    "query": query,
+                    "database": db,
+                    "table_metadata": {},
+                    "query_metrics": None,
+                    "explain_plan": None,
+                    "explain_analyze_plan": None,
+                }
 
-            # Collect table metadata in parallel using helper
-            def fetch_metadata(table_name: str):
-                """Fetch metadata for a single table."""
-                # Handle database.table notation
-                if "." in table_name:
-                    table_db, table = table_name.split(".", 1)
-                else:
-                    table_db, table = db, table_name
+                # Extract table names from query using proper SQL parsing
+                table_names = extract_table_names(query)
 
-                if table_db:
-                    return self.glue.get_table_metadata(table_db, table)
-                return None
+                # Collect table metadata in parallel using helper
+                def fetch_metadata(table_name: str):
+                    """Fetch metadata for a single table."""
+                    # Handle database.table notation
+                    if "." in table_name:
+                        table_db, table = table_name.split(".", 1)
+                    else:
+                        table_db, table = db, table_name
 
-            context["table_metadata"] = self._collect_parallel_with_logging(
-                table_names,
-                fetch_metadata,
-                "table_metadata"
-            )
+                    if table_db:
+                        return self.glue.get_table_metadata(table_db, table)
+                    return None
 
-            # Get EXPLAIN plan and optionally EXPLAIN ANALYZE in parallel
-            should_run_analyze = (
-                run_explain_analyze
-                if run_explain_analyze is not None
-                else self.config.run_explain_analyze
-            )
-
-            # Build tasks for parallel execution using partial (no lambda)
-            explain_tasks = {
-                "explain_plan": partial(self.athena.get_explain_plan, query, db)
-            }
-
-            if should_run_analyze:
-                explain_tasks["explain_analyze"] = partial(
-                    self.athena.get_explain_analyze_plan, query, db
+                context["table_metadata"] = self._collect_parallel_with_logging(
+                    table_names,
+                    fetch_metadata,
+                    "table_metadata"
                 )
 
-            # Execute EXPLAIN queries in parallel
-            explain_results = execute_parallel(explain_tasks, fail_fast=False)
-
-            # Process EXPLAIN plan result
-            explain_result = explain_results.get("explain_plan")
-            if isinstance(explain_result, Exception):
-                logger.warning(
-                    "failed_to_get_explain_plan",
-                    database=db,
-                    error=str(explain_result),
+                # Get EXPLAIN plan and optionally EXPLAIN ANALYZE in parallel
+                should_run_analyze = (
+                    run_explain_analyze
+                    if run_explain_analyze is not None
+                    else self.config.run_explain_analyze
                 )
-            else:
-                context["explain_plan"] = explain_result
 
-            # Process EXPLAIN ANALYZE result if requested
-            if should_run_analyze:
-                analyze_result = explain_results.get("explain_analyze")
-                if isinstance(analyze_result, Exception):
+                # Build tasks for parallel execution using partial (no lambda)
+                explain_tasks = {
+                    "explain_plan": partial(self.athena.get_explain_plan, query, db)
+                }
+
+                if should_run_analyze:
+                    explain_tasks["explain_analyze"] = partial(
+                        self.athena.get_explain_analyze_plan, query, db
+                    )
+
+                # Execute EXPLAIN queries in parallel
+                explain_results = execute_parallel(explain_tasks, fail_fast=False)
+
+                # Process EXPLAIN plan result
+                explain_result = explain_results.get("explain_plan")
+                if isinstance(explain_result, Exception):
                     logger.warning(
-                        "failed_to_run_explain_analyze",
-                        database=db,
-                        error=str(analyze_result),
+                        "failed_to_get_explain_plan",
+                        error=str(explain_result),
                     )
                 else:
-                    analyze_plan, metrics = analyze_result
-                    context["explain_analyze_plan"] = analyze_plan
-                    context["query_metrics"] = metrics
+                    context["explain_plan"] = explain_result
 
-            # Run all analyzers
-            all_recommendations = []
-            for analyzer in self.analyzers:
-                if analyzer.enabled:
-                    try:
-                        recommendations = analyzer.analyze(context)
-                        all_recommendations.extend(recommendations)
-                        self.metrics.record_analyzer_execution(analyzer.name, success=True)
-                    except Exception as e:
+                # Process EXPLAIN ANALYZE result if requested
+                if should_run_analyze:
+                    analyze_result = explain_results.get("explain_analyze")
+                    if isinstance(analyze_result, Exception):
                         logger.warning(
-                            "analyzer_failed",
-                            analyzer_name=analyzer.name,
-                            error=str(e),
+                            "failed_to_run_explain_analyze",
+                            error=str(analyze_result),
                         )
-                        self.metrics.record_analyzer_execution(analyzer.name, success=False)
+                    else:
+                        analyze_plan, metrics = analyze_result
+                        context["explain_analyze_plan"] = analyze_plan
+                        context["query_metrics"] = metrics
 
-            # Sort recommendations by severity and confidence
-            sorted_recommendations = self._sort_recommendations(all_recommendations)
+                # Run all analyzers
+                all_recommendations = []
+                for analyzer in self.analyzers:
+                    if analyzer.enabled:
+                        try:
+                            recommendations = analyzer.analyze(context)
+                            all_recommendations.extend(recommendations)
+                            self.metrics.record_analyzer_execution(analyzer.name, success=True)
+                        except Exception as e:
+                            logger.warning(
+                                "analyzer_failed",
+                                analyzer_name=analyzer.name,
+                                error=str(e),
+                            )
+                            self.metrics.record_analyzer_execution(analyzer.name, success=False)
 
-            # Use cost calculator to analyze costs and savings
-            cost_analysis = self.cost_calculator.analyze_costs_from_recommendations(
-                sorted_recommendations,
-                context.get("query_metrics")
-            )
+                # Sort recommendations by severity and confidence
+                sorted_recommendations = self._sort_recommendations(all_recommendations)
 
-            # Record metrics
-            self.metrics.record_recommendations(sorted_recommendations)
-            self.metrics.record_cost_analysis(
-                cost_analysis.total_current_cost_usd,
-                cost_analysis.total_optimized_cost_usd,
-                cost_analysis.total_savings_usd
-            )
+                # Use cost calculator to analyze costs and savings
+                cost_analysis = self.cost_calculator.analyze_costs_from_recommendations(
+                    sorted_recommendations,
+                    context.get("query_metrics")
+                )
 
-            result = AnalysisResult(
-                query=query,
-                recommendations=sorted_recommendations,
-                explain_plan=context.get("parsed_explain_plan"),
-                query_metrics=context.get("query_metrics"),
-                table_metadata=context["table_metadata"],
-                total_current_cost_usd=cost_analysis.total_current_cost_usd,
-                total_optimized_cost_usd=cost_analysis.total_optimized_cost_usd,
-                total_savings_usd=cost_analysis.total_savings_usd,
-                total_savings_percentage=cost_analysis.total_savings_percentage,
-                analysis_timestamp=datetime.now(timezone.utc).isoformat(),
-                config={
-                    "region": self.config.region,
-                    "workgroup": self.config.workgroup,
-                    "database": db,
-                }
-            )
+                # Record metrics
+                self.metrics.record_recommendations(sorted_recommendations)
+                self.metrics.record_cost_analysis(
+                    cost_analysis.total_current_cost_usd,
+                    cost_analysis.total_optimized_cost_usd,
+                    cost_analysis.total_savings_usd
+                )
 
-            # Mark operation as successful
-            operation.complete(success=True)
-            self.metrics.record_operation(operation)
+                result = AnalysisResult(
+                    query=query,
+                    recommendations=sorted_recommendations,
+                    explain_plan=context.get("parsed_explain_plan"),
+                    query_metrics=context.get("query_metrics"),
+                    table_metadata=context["table_metadata"],
+                    total_current_cost_usd=cost_analysis.total_current_cost_usd,
+                    total_optimized_cost_usd=cost_analysis.total_optimized_cost_usd,
+                    total_savings_usd=cost_analysis.total_savings_usd,
+                    total_savings_percentage=cost_analysis.total_savings_percentage,
+                    analysis_timestamp=datetime.now(timezone.utc).isoformat(),
+                    config={
+                        "region": self.config.region,
+                        "workgroup": self.config.workgroup,
+                        "database": db,
+                    }
+                )
 
-            return result
+                logger.info(
+                    "query_analysis_completed",
+                    recommendations_count=len(sorted_recommendations),
+                    savings_usd=cost_analysis.total_savings_usd
+                )
+
+                # Mark operation as successful
+                operation.complete(success=True)
+                self.metrics.record_operation(operation)
+
+                return result
 
         except Exception as e:
             # Mark operation as failed

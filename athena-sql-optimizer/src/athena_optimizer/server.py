@@ -76,10 +76,12 @@ def _create_config_from_env() -> OptimizerConfig:
     )
 
 
-@mcp.on_startup()
-async def startup():
-    """Initialize the optimization engine when MCP server starts."""
+def _initialize_engine():
+    """Initialize the optimization engine from environment variables."""
     global _engine
+
+    if _engine is not None:
+        return  # Already initialized
 
     try:
         config = _create_config_from_env()
@@ -97,21 +99,6 @@ async def startup():
             required_vars=["ATHENA_WORKGROUP", "ATHENA_S3_OUTPUT"],
         )
         raise
-
-
-@mcp.on_shutdown()
-async def shutdown():
-    """Clean up resources when MCP server stops."""
-    global _engine
-
-    if _engine is not None:
-        try:
-            _engine.close()
-            logger.info("mcp_server_stopped")
-        except Exception as e:
-            logger.error("mcp_server_shutdown_error", error=str(e))
-        finally:
-            _engine = None
 
 
 @mcp.tool()
@@ -194,12 +181,56 @@ def check_table_health(
     return engine.check_table_health(database, table)
 
 
+@mcp.tool()
+@mcp_tool_handler
+def get_server_diagnostics() -> dict:
+    """
+    Get MCP server diagnostics and performance metrics.
+
+    Provides cache statistics and server health information to help
+    debug performance issues and monitor the optimizer's effectiveness.
+
+    Returns:
+        Server diagnostics including:
+        - Metadata cache statistics (hit rate, size, TTL)
+        - Partition cache statistics (hit rate, size, TTL)
+        - Server status
+
+    Example:
+        {
+          "metadata_cache": {
+            "size": 42,
+            "hits": 150,
+            "misses": 8,
+            "hit_rate": 94.94,
+            "ttl_seconds": 300
+          },
+          "partition_cache": {
+            "size": 15,
+            "hits": 89,
+            "misses": 12,
+            "hit_rate": 88.12,
+            "ttl_seconds": 120
+          },
+          "status": "healthy"
+        }
+    """
+    engine = get_engine()
+    return {
+        "metadata_cache": engine.glue._metadata_cache.get_stats(),
+        "partition_cache": engine.glue._partition_cache.get_stats(),
+        "status": "healthy"
+    }
+
+
 def main():
     """
     Main entry point for the MCP server.
 
-    The server will initialize from environment variables using the
-    @mcp.on_startup() hook. Required environment variables:
+    Initializes the optimization engine from environment variables,
+    then starts the MCP server.
+
+    Required environment variables:
     - ATHENA_WORKGROUP: Athena workgroup name
     - ATHENA_S3_OUTPUT: S3 output location for query results
 
@@ -212,6 +243,10 @@ def main():
     - ATHENA_COST_PER_TB: Cost per TB in USD (default: 5.0)
     - TIMEOUT_SECONDS: Query timeout (default: 300)
     """
+    # Initialize engine before starting MCP server
+    _initialize_engine()
+
+    # Start MCP server
     mcp.run()
 
 
