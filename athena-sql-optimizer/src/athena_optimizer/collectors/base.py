@@ -64,3 +64,33 @@ class BaseCollector(ABC):
             self.close()
         except:
             pass  # Ignore errors in __del__
+
+    def _get_catalog_id(self, catalog: Optional[str] = None) -> Optional[str]:
+        """
+        Get catalog ID with fallback to config.
+
+        Args:
+            catalog: Explicit catalog ID (overrides config)
+
+        Returns:
+            Catalog ID to use, or None if not specified
+        """
+        return catalog or self.config.catalog
+
+    def _add_catalog_to_params(
+        self,
+        params: dict,
+        catalog: Optional[str] = None
+    ) -> None:
+        """
+        Add catalog ID to params dictionary if available.
+
+        This helper eliminates repeated catalog handling logic throughout collectors.
+
+        Args:
+            params: Parameters dictionary to modify in-place
+            catalog: Optional catalog ID (falls back to config)
+        """
+        catalog_id = self._get_catalog_id(catalog)
+        if catalog_id:
+            params["CatalogId"] = catalog_id

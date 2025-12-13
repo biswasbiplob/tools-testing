@@ -73,9 +73,7 @@ class GlueCollector(BaseCollector):
             "DatabaseName": database,
             "Name": table
         }
-
-        if catalog or self.config.catalog:
-            params["CatalogId"] = catalog or self.config.catalog
+        self._add_catalog_to_params(params, catalog)
 
         try:
             response = self.client.get_table(**params)
@@ -249,8 +247,7 @@ class GlueCollector(BaseCollector):
     def list_databases(self, catalog: Optional[str] = None) -> list[str]:
         """List all databases in the catalog."""
         params = {}
-        if catalog or self.config.catalog:
-            params["CatalogId"] = catalog or self.config.catalog
+        self._add_catalog_to_params(params, catalog)
 
         try:
             paginator = self.client.get_paginator("get_databases")
@@ -273,8 +270,7 @@ class GlueCollector(BaseCollector):
     def list_tables(self, database: str, catalog: Optional[str] = None) -> list[str]:
         """List all tables in a database."""
         params = {"DatabaseName": database}
-        if catalog or self.config.catalog:
-            params["CatalogId"] = catalog or self.config.catalog
+        self._add_catalog_to_params(params, catalog)
 
         try:
             paginator = self.client.get_paginator("get_tables")
