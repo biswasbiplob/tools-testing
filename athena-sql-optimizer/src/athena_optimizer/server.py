@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .decorators import mcp_tool_handler
 from .logging import get_logger
+from .exceptions import ConfigurationError
 from .models import OptimizerConfig
 from .engine import OptimizationEngine
 
@@ -68,13 +69,19 @@ def initialize_engine(
         timeout_seconds: Query timeout in seconds (default: 300)
 
     Raises:
-        ValueError: If required parameters are missing
+        ConfigurationError: If required parameters are missing
     """
     # Validate required parameters
     if not workgroup:
-        raise ValueError("workgroup parameter is required")
+        raise ConfigurationError(
+            "workgroup parameter is required",
+            details={"parameter": "workgroup"}
+        )
     if not s3_output_location:
-        raise ValueError("s3_output_location parameter is required")
+        raise ConfigurationError(
+            "s3_output_location parameter is required",
+            details={"parameter": "s3_output_location"}
+        )
 
     config = OptimizerConfig(
         aws_profile=aws_profile,

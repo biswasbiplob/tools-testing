@@ -6,6 +6,11 @@ from botocore.exceptions import ClientError
 
 from athena_optimizer.collectors import AthenaCollector, GlueCollector
 from athena_optimizer.models import QueryMetrics, TableMetadata
+from athena_optimizer.exceptions import (
+    QueryExecutionError,
+    QueryTimeoutError,
+    TableNotFoundError,
+)
 
 
 class TestAthenaCollector:
@@ -76,7 +81,7 @@ class TestAthenaCollector:
 
         collector = AthenaCollector(optimizer_config)
 
-        with pytest.raises(RuntimeError, match="Query failed"):
+        with pytest.raises(QueryExecutionError):
             collector.execute_query("SELECT * FROM test")
 
     @patch('boto3.Session')
@@ -159,7 +164,7 @@ class TestAthenaCollector:
 
         collector = AthenaCollector(optimizer_config)
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(QueryTimeoutError):
             collector.execute_query("SELECT * FROM test")
 
 
@@ -229,7 +234,7 @@ class TestGlueCollector:
 
         collector = GlueCollector(optimizer_config)
 
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(TableNotFoundError):
             collector.get_table_metadata("test_db", "nonexistent")
 
     @patch('boto3.Session')

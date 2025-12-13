@@ -5,6 +5,7 @@ from botocore.exceptions import ClientError
 
 from ..models import TableMetadata, OptimizerConfig
 from ..cache import TTLCache
+from ..exceptions import TableNotFoundError, MetadataFetchError
 from .base import BaseCollector
 
 
@@ -120,8 +121,17 @@ class GlueCollector(BaseCollector):
 
         except ClientError as e:
             if e.response["Error"]["Code"] == "EntityNotFoundException":
-                raise ValueError(f"Table {database}.{table} not found") from e
-            raise RuntimeError(f"Failed to get table metadata: {e}") from e
+                raise TableNotFoundError(
+                    database,
+                    table,
+                    details={"catalog": catalog or self.config.catalog}
+                ) from e
+            raise MetadataFetchError(
+                "table",
+                f"{database}.{table}",
+                str(e),
+                details={"catalog": catalog or self.config.catalog}
+            ) from e
 
     def get_partitions(
         self, database: str, table: str, max_partitions: int = 1000
@@ -181,7 +191,12 @@ class GlueCollector(BaseCollector):
                 # Cache empty result too
                 self._partition_cache.set(cache_key, [])
                 return []  # Table has no partitions
-            raise RuntimeError(f"Failed to get partitions: {e}") from e
+            raise MetadataFetchError(
+                "partitions",
+                f"{database}.{table}",
+                str(e),
+                details={"max_partitions": max_partitions}
+            ) from e
 
     def get_table_statistics(self, database: str, table: str) -> dict:
         """Get table statistics if available."""
@@ -241,7 +256,11 @@ class GlueCollector(BaseCollector):
             return databases
 
         except ClientError as e:
-            raise RuntimeError(f"Failed to list databases: {e}") from e
+            raise MetadataFetchError(
+                "databases",
+                catalog or self.config.catalog or "default",
+                str(e)
+            ) from e
 
     def list_tables(self, database: str, catalog: Optional[str] = None) -> list[str]:
         """List all tables in a database."""
@@ -261,4 +280,9 @@ class GlueCollector(BaseCollector):
             return tables
 
         except ClientError as e:
-            raise RuntimeError(f"Failed to list tables: {e}") from e
+            raise MetadataFetchError(
+                "tables",
+                database,
+                str(e),
+                details={"catalog": catalog or self.config.catalog}
+            ) from e

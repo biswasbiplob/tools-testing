@@ -5,6 +5,7 @@ from typing import Optional
 from botocore.exceptions import ClientError
 
 from ..models import QueryMetrics, OptimizerConfig
+from ..exceptions import QueryExecutionError, QueryTimeoutError, AWSConnectionError
 from .base import BaseCollector
 
 
@@ -56,7 +57,10 @@ class AthenaCollector(BaseCollector):
             return query_execution_id, metrics
 
         except ClientError as e:
-            raise RuntimeError(f"Failed to execute query: {e}") from e
+            raise AWSConnectionError(
+                "Failed to execute query",
+                details={"error": str(e), "query": query[:100]}
+            ) from e
 
     def _wait_for_query(self, query_execution_id: str) -> QueryMetrics:
         """Wait for query completion and return metrics."""
@@ -76,18 +80,31 @@ class AthenaCollector(BaseCollector):
                     reason = response["QueryExecution"]["Status"].get(
                         "StateChangeReason", "Unknown error"
                     )
-                    raise RuntimeError(f"Query failed: {reason}")
+                    raise QueryExecutionError(
+                        query_execution_id,
+                        reason,
+                        details={"status": status}
+                    )
                 elif status == "CANCELLED":
-                    raise RuntimeError("Query was cancelled")
+                    raise QueryExecutionError(
+                        query_execution_id,
+                        "Query was cancelled",
+                        details={"status": status}
+                    )
 
                 # Still running, wait and retry
                 time.sleep(2)
 
             except ClientError as e:
-                raise RuntimeError(f"Failed to get query status: {e}") from e
+                raise AWSConnectionError(
+                    "Failed to get query status",
+                    details={"error": str(e), "query_id": query_execution_id}
+                ) from e
 
-        raise TimeoutError(
-            f"Query did not complete within {self.config.timeout_seconds} seconds"
+        raise QueryTimeoutError(
+            query_execution_id,
+            self.config.timeout_seconds,
+            details={"max_attempts": max_attempts}
         )
 
     def _extract_metrics(self, query_execution: dict) -> QueryMetrics:
