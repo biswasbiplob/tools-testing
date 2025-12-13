@@ -3,6 +3,7 @@
 import logging
 import sys
 from typing import Any
+from contextlib import contextmanager
 
 import structlog
 
@@ -62,6 +63,71 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
         Configured structlog logger
     """
     return structlog.get_logger(name)
+
+
+def bind_context(**kwargs: Any) -> None:
+    """
+    Bind context variables that will be included in all subsequent log messages.
+
+    This uses structlog's contextvars support to propagate context across
+    function calls without explicitly passing it through the call stack.
+
+    Args:
+        **kwargs: Key-value pairs to bind to logging context
+
+    Example:
+        bind_context(database="prod_db", table="users", catalog="prod")
+        logger.info("processing_table")  # Will include database, table, catalog
+    """
+    structlog.contextvars.bind_contextvars(**kwargs)
+
+
+def unbind_context(*keys: str) -> None:
+    """
+    Remove specific keys from the logging context.
+
+    Args:
+        *keys: Context keys to unbind
+
+    Example:
+        unbind_context("table", "catalog")
+    """
+    structlog.contextvars.unbind_contextvars(*keys)
+
+
+def clear_context() -> None:
+    """
+    Clear all context variables from the logging context.
+
+    Useful for cleaning up context at the end of a request or operation.
+    """
+    structlog.contextvars.clear_contextvars()
+
+
+@contextmanager
+def logging_context(**kwargs: Any):
+    """
+    Context manager for temporary logging context.
+
+    Automatically binds context variables on entry and unbinds them on exit.
+    This ensures context is properly cleaned up even if exceptions occur.
+
+    Args:
+        **kwargs: Key-value pairs to bind to logging context
+
+    Example:
+        with logging_context(database="prod_db", table="users"):
+            logger.info("processing")  # Includes database and table
+            process_table()
+        # database and table are automatically removed from context
+    """
+    # Bind context variables
+    bind_context(**kwargs)
+    try:
+        yield
+    finally:
+        # Always unbind, even if exception occurs
+        unbind_context(*kwargs.keys())
 
 
 # Configure logging on module import with sensible defaults
