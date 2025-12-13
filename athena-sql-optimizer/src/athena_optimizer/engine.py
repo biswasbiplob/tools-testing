@@ -7,6 +7,7 @@ from .logging import get_logger
 from .sql_parser import extract_table_names
 from .cost_calculator import CostCalculator
 from .metrics import get_metrics_collector
+from .parallel import execute_parallel
 from .constants import (
     DEFAULT_MAX_PARTITIONS,
     SEVERITY_ORDER_CRITICAL,
@@ -120,9 +121,10 @@ class OptimizationEngine:
             # Extract table names from query using proper SQL parsing
             table_names = extract_table_names(query)
 
-            # Collect table metadata
-            for table_name in table_names:
-                try:
+            # Collect table metadata in parallel for better performance
+            if table_names:
+                def fetch_metadata(table_name: str):
+                    """Fetch metadata for a single table."""
                     # Handle database.table notation
                     if "." in table_name:
                         table_db, table = table_name.split(".", 1)
@@ -130,46 +132,71 @@ class OptimizationEngine:
                         table_db, table = db, table_name
 
                     if table_db:
-                        metadata = self.glue.get_table_metadata(table_db, table)
-                        context["table_metadata"][table_name] = metadata
-                except Exception as e:
-                    # Table might not exist or access denied - continue anyway
-                    logger.warning(
-                        "failed_to_fetch_table_metadata",
-                        table_name=table_name,
-                        database=table_db,
-                        error=str(e),
-                    )
+                        return self.glue.get_table_metadata(table_db, table)
+                    return None
 
-            # Get EXPLAIN plan
-            try:
-                explain_plan = self.athena.get_explain_plan(query, db)
-                context["explain_plan"] = explain_plan
-            except Exception as e:
-                logger.warning(
-                    "failed_to_get_explain_plan",
-                    database=db,
-                    error=str(e),
-                )
+                # Create parallel tasks for each table
+                metadata_tasks = {
+                    table_name: lambda tn=table_name: fetch_metadata(tn)
+                    for table_name in table_names
+                }
 
-            # Optionally run EXPLAIN ANALYZE
+                # Execute metadata fetches in parallel
+                metadata_results = execute_parallel(metadata_tasks, fail_fast=False)
+
+                # Process results and handle errors
+                for table_name, result in metadata_results.items():
+                    if isinstance(result, Exception):
+                        # Table might not exist or access denied - log and continue
+                        logger.warning(
+                            "failed_to_fetch_table_metadata",
+                            table_name=table_name,
+                            error=str(result),
+                        )
+                    elif result is not None:
+                        context["table_metadata"][table_name] = result
+
+            # Get EXPLAIN plan and optionally EXPLAIN ANALYZE in parallel
             should_run_analyze = (
                 run_explain_analyze
                 if run_explain_analyze is not None
                 else self.config.run_explain_analyze
             )
 
+            # Build tasks for parallel execution
+            explain_tasks = {}
+            explain_tasks["explain_plan"] = lambda: self.athena.get_explain_plan(query, db)
+
             if should_run_analyze:
-                try:
-                    analyze_plan, metrics = self.athena.get_explain_analyze_plan(query, db)
-                    context["explain_analyze_plan"] = analyze_plan
-                    context["query_metrics"] = metrics
-                except Exception as e:
+                explain_tasks["explain_analyze"] = lambda: self.athena.get_explain_analyze_plan(query, db)
+
+            # Execute EXPLAIN queries in parallel
+            explain_results = execute_parallel(explain_tasks, fail_fast=False)
+
+            # Process EXPLAIN plan result
+            explain_result = explain_results.get("explain_plan")
+            if isinstance(explain_result, Exception):
+                logger.warning(
+                    "failed_to_get_explain_plan",
+                    database=db,
+                    error=str(explain_result),
+                )
+            else:
+                context["explain_plan"] = explain_result
+
+            # Process EXPLAIN ANALYZE result if requested
+            if should_run_analyze:
+                analyze_result = explain_results.get("explain_analyze")
+                if isinstance(analyze_result, Exception):
                     logger.warning(
                         "failed_to_run_explain_analyze",
                         database=db,
-                        error=str(e),
+                        error=str(analyze_result),
                     )
+                else:
+                    analyze_plan, metrics = analyze_result
+                    context["explain_analyze_plan"] = analyze_plan
+                    context["query_metrics"] = metrics
 
             # Run all analyzers
             all_recommendations = []
@@ -250,24 +277,39 @@ class OptimizationEngine:
         db = database or self.config.database
         table_names = extract_table_names(query)
 
-        total_size_bytes = 0
         table_sizes = {}
 
-        for table_name in table_names:
-            try:
-                if "." in table_name:
-                    table_db, table = table_name.split(".", 1)
-                else:
-                    table_db, table = db, table_name
+        # Fetch table statistics in parallel
+        if table_names:
+            def fetch_stats(table_name: str):
+                """Fetch statistics for a single table."""
+                try:
+                    if "." in table_name:
+                        table_db, table = table_name.split(".", 1)
+                    else:
+                        table_db, table = db, table_name
 
-                if table_db:
-                    stats = self.glue.get_table_statistics(table_db, table)
-                    size = int(stats.get("total_size", 0))
-                    table_sizes[table_name] = size
-                    total_size_bytes += size
-            except Exception:
-                # Could not get size, skip
-                pass
+                    if table_db:
+                        stats = self.glue.get_table_statistics(table_db, table)
+                        return int(stats.get("total_size", 0))
+                except Exception:
+                    # Could not get size, skip
+                    pass
+                return 0
+
+            # Create parallel tasks
+            stats_tasks = {
+                table_name: lambda tn=table_name: fetch_stats(tn)
+                for table_name in table_names
+            }
+
+            # Execute in parallel
+            stats_results = execute_parallel(stats_tasks, fail_fast=False)
+
+            # Collect results
+            for table_name, result in stats_results.items():
+                if not isinstance(result, Exception) and result:
+                    table_sizes[table_name] = result
 
         # Use cost calculator to estimate costs
         cost_estimate = self.cost_calculator.estimate_cost_from_table_sizes(table_sizes)
