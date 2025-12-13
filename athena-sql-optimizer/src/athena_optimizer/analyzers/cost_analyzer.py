@@ -2,8 +2,8 @@
 
 from typing import Any
 
+from ..cost_calculator import CostCalculator
 from ..constants import (
-    BYTES_PER_TB,
     HIGH_COST_THRESHOLD_USD,
     MEDIUM_COST_THRESHOLD_USD,
     CONFIDENCE_VERY_HIGH,
@@ -16,6 +16,11 @@ from .base import BaseAnalyzer
 
 class CostAnalyzer(BaseAnalyzer):
     """Analyzes query costs and provides cost optimization recommendations."""
+
+    def __init__(self, config):
+        """Initialize cost analyzer with cost calculator."""
+        super().__init__(config)
+        self.cost_calculator = CostCalculator(cost_per_tb=config.athena_cost_per_tb)
 
     @property
     def name(self) -> str:
@@ -31,9 +36,8 @@ class CostAnalyzer(BaseAnalyzer):
         if not metrics:
             return recommendations
 
-        # Calculate current cost
-        data_scanned_tb = metrics.data_scanned_bytes / BYTES_PER_TB
-        current_cost = data_scanned_tb * self.config.athena_cost_per_tb
+        # Calculate current cost using cost calculator
+        current_cost, data_scanned_tb = self.cost_calculator.calculate_cost_from_metrics(metrics)
 
         # High cost warning
         if current_cost > HIGH_COST_THRESHOLD_USD:

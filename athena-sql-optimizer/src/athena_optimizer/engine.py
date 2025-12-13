@@ -5,12 +5,9 @@ from typing import Optional
 
 from .logging import get_logger
 from .sql_parser import extract_table_names
+from .cost_calculator import CostCalculator
 from .constants import (
-    BYTES_PER_TB,
-    MIN_COST_MULTIPLIER,
-    MAX_COST_MULTIPLIER,
     DEFAULT_MAX_PARTITIONS,
-    PERCENTAGE_MULTIPLIER,
     SEVERITY_ORDER_CRITICAL,
     SEVERITY_ORDER_HIGH,
     SEVERITY_ORDER_MEDIUM,
@@ -46,6 +43,7 @@ class OptimizationEngine:
         self.config = config
         self.athena = AthenaCollector(config)
         self.glue = GlueCollector(config)
+        self.cost_calculator = CostCalculator(cost_per_tb=config.athena_cost_per_tb)
         self._closed = False
 
         # Initialize all analyzers
@@ -181,44 +179,10 @@ class OptimizationEngine:
         # Sort recommendations by severity and confidence
         sorted_recommendations = self._sort_recommendations(all_recommendations)
 
-        # Calculate aggregate costs and savings
-        total_current_cost = 0.0
-        total_optimized_cost = 0.0
-        total_savings = 0.0
-
-        for rec in sorted_recommendations:
-            if rec.current_cost_usd:
-                total_current_cost += rec.current_cost_usd
-            if rec.optimized_cost_usd:
-                total_optimized_cost += rec.optimized_cost_usd
-            if rec.savings_usd:
-                total_savings += rec.savings_usd
-
-        # Calculate cost from metrics if available
-        if context.get("query_metrics"):
-            metrics = context["query_metrics"]
-            data_scanned_tb = metrics.data_scanned_bytes / BYTES_PER_TB
-            metrics_based_cost = data_scanned_tb * self.config.athena_cost_per_tb
-
-            # Use metrics-based cost if we don't have cost from recommendations
-            if total_current_cost == 0:
-                total_current_cost = metrics_based_cost
-
-            # Calculate potential optimized cost based on recommendation percentages
-            if total_current_cost > 0 and total_optimized_cost == 0:
-                max_savings_percentage = 0.0
-                for rec in sorted_recommendations:
-                    if rec.savings_percentage and rec.savings_percentage > max_savings_percentage:
-                        max_savings_percentage = rec.savings_percentage
-
-                if max_savings_percentage > 0:
-                    total_optimized_cost = total_current_cost * (1 - max_savings_percentage / PERCENTAGE_MULTIPLIER)
-                    total_savings = total_current_cost - total_optimized_cost
-
-        total_savings_percentage = (
-            (total_savings / total_current_cost * PERCENTAGE_MULTIPLIER)
-            if total_current_cost > 0
-            else 0.0
+        # Use cost calculator to analyze costs and savings
+        cost_analysis = self.cost_calculator.analyze_costs_from_recommendations(
+            sorted_recommendations,
+            context.get("query_metrics")
         )
 
         return AnalysisResult(
@@ -227,10 +191,10 @@ class OptimizationEngine:
             explain_plan=context.get("parsed_explain_plan"),
             query_metrics=context.get("query_metrics"),
             table_metadata=context["table_metadata"],
-            total_current_cost_usd=total_current_cost,
-            total_optimized_cost_usd=total_optimized_cost,
-            total_savings_usd=total_savings,
-            total_savings_percentage=total_savings_percentage,
+            total_current_cost_usd=cost_analysis.total_current_cost_usd,
+            total_optimized_cost_usd=cost_analysis.total_optimized_cost_usd,
+            total_savings_usd=cost_analysis.total_savings_usd,
+            total_savings_percentage=cost_analysis.total_savings_percentage,
             analysis_timestamp=datetime.now(timezone.utc).isoformat(),
             config={
                 "region": self.config.region,
@@ -274,27 +238,19 @@ class OptimizationEngine:
                 # Could not get size, skip
                 pass
 
-        # Estimate based on table sizes
-        # Actual scan depends on partitions, projections, etc.
-        estimated_scan_tb = total_size_bytes / BYTES_PER_TB
-        estimated_cost = estimated_scan_tb * self.config.athena_cost_per_tb
-
-        # Provide range based on typical optimizations
-        min_cost = estimated_cost * MIN_COST_MULTIPLIER  # With optimal partitioning and projection
-        max_cost = estimated_cost * MAX_COST_MULTIPLIER  # Full table scan
+        # Use cost calculator to estimate costs
+        cost_estimate = self.cost_calculator.estimate_cost_from_table_sizes(table_sizes)
 
         return {
-            "estimated_cost_usd": estimated_cost,
-            "estimated_scan_tb": estimated_scan_tb,
+            "estimated_cost_usd": cost_estimate.estimated_cost_usd,
+            "estimated_scan_tb": cost_estimate.estimated_scan_tb,
             "cost_range_usd": {
-                "min": min_cost,
-                "max": max_cost
+                "min": cost_estimate.min_cost_usd,
+                "max": cost_estimate.max_cost_usd
             },
+            "table_sizes_tb": cost_estimate.table_sizes,
             "table_sizes_bytes": table_sizes,
-            "note": (
-                "This is an estimate based on table sizes. "
-                "Actual cost depends on partitions, column selection, and filters."
-            )
+            "assumptions": cost_estimate.assumptions
         }
 
     def check_table_health(
