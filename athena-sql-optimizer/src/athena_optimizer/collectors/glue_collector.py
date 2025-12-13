@@ -5,6 +5,7 @@ from botocore.exceptions import ClientError
 
 from ..models import TableMetadata, OptimizerConfig
 from ..cache import TTLCache
+from ..metrics import get_metrics_collector
 from ..exceptions import TableNotFoundError, MetadataFetchError
 from .base import BaseCollector
 
@@ -24,6 +25,7 @@ class GlueCollector(BaseCollector):
         self._metadata_cache = TTLCache(default_ttl_seconds=300)
         # Cache partitions for 2 minutes (they change more frequently)
         self._partition_cache = TTLCache(default_ttl_seconds=120)
+        self._metrics = get_metrics_collector()
 
     @property
     def client_name(self) -> str:
@@ -61,9 +63,12 @@ class GlueCollector(BaseCollector):
         # Try to get from cache
         cached_metadata = self._metadata_cache.get(cache_key)
         if cached_metadata is not None:
+            self._metrics.record_cache_hit()
             return cached_metadata
 
         # Not in cache, fetch from Glue
+        self._metrics.record_cache_miss()
+        self._metrics.record_api_call("glue")
         params = {
             "DatabaseName": database,
             "Name": table
@@ -158,9 +163,12 @@ class GlueCollector(BaseCollector):
         # Try to get from cache
         cached_partitions = self._partition_cache.get(cache_key)
         if cached_partitions is not None:
+            self._metrics.record_cache_hit()
             return cached_partitions
 
         # Not in cache, fetch from Glue
+        self._metrics.record_cache_miss()
+        self._metrics.record_api_call("glue")
         try:
             paginator = self.client.get_paginator("get_partitions")
             page_iterator = paginator.paginate(

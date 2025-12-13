@@ -6,6 +6,7 @@ from typing import Optional
 from .logging import get_logger
 from .sql_parser import extract_table_names
 from .cost_calculator import CostCalculator
+from .metrics import get_metrics_collector
 from .constants import (
     DEFAULT_MAX_PARTITIONS,
     SEVERITY_ORDER_CRITICAL,
@@ -44,6 +45,7 @@ class OptimizationEngine:
         self.athena = AthenaCollector(config)
         self.glue = GlueCollector(config)
         self.cost_calculator = CostCalculator(cost_per_tb=config.athena_cost_per_tb)
+        self.metrics = get_metrics_collector()
         self._closed = False
 
         # Initialize all analyzers
@@ -96,112 +98,141 @@ class OptimizationEngine:
         Returns:
             Complete analysis result with recommendations
         """
-        db = database or self.config.database
-
-        # Initialize context for analyzers
-        context = {
-            "query": query,
-            "database": db,
-            "table_metadata": {},
-            "query_metrics": None,
-            "explain_plan": None,
-            "explain_analyze_plan": None,
-        }
-
-        # Extract table names from query using proper SQL parsing
-        table_names = extract_table_names(query)
-
-        # Collect table metadata
-        for table_name in table_names:
-            try:
-                # Handle database.table notation
-                if "." in table_name:
-                    table_db, table = table_name.split(".", 1)
-                else:
-                    table_db, table = db, table_name
-
-                if table_db:
-                    metadata = self.glue.get_table_metadata(table_db, table)
-                    context["table_metadata"][table_name] = metadata
-            except Exception as e:
-                # Table might not exist or access denied - continue anyway
-                logger.warning(
-                    "failed_to_fetch_table_metadata",
-                    table_name=table_name,
-                    database=table_db,
-                    error=str(e),
-                )
-
-        # Get EXPLAIN plan
-        try:
-            explain_plan = self.athena.get_explain_plan(query, db)
-            context["explain_plan"] = explain_plan
-        except Exception as e:
-            logger.warning(
-                "failed_to_get_explain_plan",
-                database=db,
-                error=str(e),
-            )
-
-        # Optionally run EXPLAIN ANALYZE
-        should_run_analyze = (
-            run_explain_analyze
-            if run_explain_analyze is not None
-            else self.config.run_explain_analyze
+        # Start metrics tracking
+        operation = self.metrics.start_operation(
+            "analyze_query",
+            metadata={"database": database or self.config.database}
         )
 
-        if should_run_analyze:
+        try:
+            db = database or self.config.database
+
+            # Initialize context for analyzers
+            context = {
+                "query": query,
+                "database": db,
+                "table_metadata": {},
+                "query_metrics": None,
+                "explain_plan": None,
+                "explain_analyze_plan": None,
+            }
+
+            # Extract table names from query using proper SQL parsing
+            table_names = extract_table_names(query)
+
+            # Collect table metadata
+            for table_name in table_names:
+                try:
+                    # Handle database.table notation
+                    if "." in table_name:
+                        table_db, table = table_name.split(".", 1)
+                    else:
+                        table_db, table = db, table_name
+
+                    if table_db:
+                        metadata = self.glue.get_table_metadata(table_db, table)
+                        context["table_metadata"][table_name] = metadata
+                except Exception as e:
+                    # Table might not exist or access denied - continue anyway
+                    logger.warning(
+                        "failed_to_fetch_table_metadata",
+                        table_name=table_name,
+                        database=table_db,
+                        error=str(e),
+                    )
+
+            # Get EXPLAIN plan
             try:
-                analyze_plan, metrics = self.athena.get_explain_analyze_plan(query, db)
-                context["explain_analyze_plan"] = analyze_plan
-                context["query_metrics"] = metrics
+                explain_plan = self.athena.get_explain_plan(query, db)
+                context["explain_plan"] = explain_plan
             except Exception as e:
                 logger.warning(
-                    "failed_to_run_explain_analyze",
+                    "failed_to_get_explain_plan",
                     database=db,
                     error=str(e),
                 )
 
-        # Run all analyzers
-        all_recommendations = []
-        for analyzer in self.analyzers:
-            if analyzer.enabled:
+            # Optionally run EXPLAIN ANALYZE
+            should_run_analyze = (
+                run_explain_analyze
+                if run_explain_analyze is not None
+                else self.config.run_explain_analyze
+            )
+
+            if should_run_analyze:
                 try:
-                    recommendations = analyzer.analyze(context)
-                    all_recommendations.extend(recommendations)
+                    analyze_plan, metrics = self.athena.get_explain_analyze_plan(query, db)
+                    context["explain_analyze_plan"] = analyze_plan
+                    context["query_metrics"] = metrics
                 except Exception as e:
                     logger.warning(
-                        "analyzer_failed",
-                        analyzer_name=analyzer.name,
+                        "failed_to_run_explain_analyze",
+                        database=db,
                         error=str(e),
                     )
 
-        # Sort recommendations by severity and confidence
-        sorted_recommendations = self._sort_recommendations(all_recommendations)
+            # Run all analyzers
+            all_recommendations = []
+            for analyzer in self.analyzers:
+                if analyzer.enabled:
+                    try:
+                        recommendations = analyzer.analyze(context)
+                        all_recommendations.extend(recommendations)
+                        self.metrics.record_analyzer_execution(analyzer.name, success=True)
+                    except Exception as e:
+                        logger.warning(
+                            "analyzer_failed",
+                            analyzer_name=analyzer.name,
+                            error=str(e),
+                        )
+                        self.metrics.record_analyzer_execution(analyzer.name, success=False)
 
-        # Use cost calculator to analyze costs and savings
-        cost_analysis = self.cost_calculator.analyze_costs_from_recommendations(
-            sorted_recommendations,
-            context.get("query_metrics")
-        )
+            # Sort recommendations by severity and confidence
+            sorted_recommendations = self._sort_recommendations(all_recommendations)
 
-        return AnalysisResult(
-            query=query,
-            recommendations=sorted_recommendations,
-            explain_plan=context.get("parsed_explain_plan"),
-            query_metrics=context.get("query_metrics"),
-            table_metadata=context["table_metadata"],
-            total_current_cost_usd=cost_analysis.total_current_cost_usd,
-            total_optimized_cost_usd=cost_analysis.total_optimized_cost_usd,
-            total_savings_usd=cost_analysis.total_savings_usd,
-            total_savings_percentage=cost_analysis.total_savings_percentage,
-            analysis_timestamp=datetime.now(timezone.utc).isoformat(),
-            config={
-                "region": self.config.region,
-                "workgroup": self.config.workgroup,
-                "database": db,
-            }
-        )
+            # Use cost calculator to analyze costs and savings
+            cost_analysis = self.cost_calculator.analyze_costs_from_recommendations(
+                sorted_recommendations,
+                context.get("query_metrics")
+            )
+
+            # Record metrics
+            self.metrics.record_recommendations(sorted_recommendations)
+            self.metrics.record_cost_analysis(
+                cost_analysis.total_current_cost_usd,
+                cost_analysis.total_optimized_cost_usd,
+                cost_analysis.total_savings_usd
+            )
+
+            result = AnalysisResult(
+                query=query,
+                recommendations=sorted_recommendations,
+                explain_plan=context.get("parsed_explain_plan"),
+                query_metrics=context.get("query_metrics"),
+                table_metadata=context["table_metadata"],
+                total_current_cost_usd=cost_analysis.total_current_cost_usd,
+                total_optimized_cost_usd=cost_analysis.total_optimized_cost_usd,
+                total_savings_usd=cost_analysis.total_savings_usd,
+                total_savings_percentage=cost_analysis.total_savings_percentage,
+                analysis_timestamp=datetime.now(timezone.utc).isoformat(),
+                config={
+                    "region": self.config.region,
+                    "workgroup": self.config.workgroup,
+                    "database": db,
+                }
+            )
+
+            # Mark operation as successful
+            operation.complete(success=True)
+            self.metrics.record_operation(operation)
+
+            return result
+
+        except Exception as e:
+            # Mark operation as failed
+            operation.complete(success=False, error=str(e))
+            self.metrics.record_operation(operation)
+            raise
 
     def estimate_cost(
         self, query: str, database: Optional[str] = None
