@@ -4,21 +4,65 @@ from typing import Optional
 from botocore.exceptions import ClientError
 
 from ..models import TableMetadata, OptimizerConfig
+from ..cache import TTLCache
 from .base import BaseCollector
 
 
 class GlueCollector(BaseCollector):
-    """Collects table metadata from Glue Data Catalog."""
+    """Collects table metadata from Glue Data Catalog with caching."""
+
+    def __init__(self, config: OptimizerConfig):
+        """
+        Initialize collector with caching support.
+
+        Args:
+            config: Optimizer configuration
+        """
+        super().__init__(config)
+        # Cache table metadata for 5 minutes
+        self._metadata_cache = TTLCache(default_ttl_seconds=300)
+        # Cache partitions for 2 minutes (they change more frequently)
+        self._partition_cache = TTLCache(default_ttl_seconds=120)
 
     @property
     def client_name(self) -> str:
         """Return the AWS service name."""
         return "glue"
 
+    def clear_cache(self) -> None:
+        """Clear all caches."""
+        self._metadata_cache.clear()
+        self._partition_cache.clear()
+
     def get_table_metadata(
         self, database: str, table: str, catalog: Optional[str] = None
     ) -> TableMetadata:
-        """Get metadata for a specific table."""
+        """
+        Get metadata for a specific table with caching.
+
+        Results are cached for 5 minutes to reduce API calls to Glue.
+
+        Args:
+            database: Database name
+            table: Table name
+            catalog: Catalog ID (optional)
+
+        Returns:
+            Table metadata
+
+        Raises:
+            ValueError: If table not found
+            RuntimeError: If API call fails
+        """
+        # Create cache key
+        cache_key = f"{database}.{table}.{catalog or self.config.catalog}"
+
+        # Try to get from cache
+        cached_metadata = self._metadata_cache.get(cache_key)
+        if cached_metadata is not None:
+            return cached_metadata
+
+        # Not in cache, fetch from Glue
         params = {
             "DatabaseName": database,
             "Name": table
@@ -53,7 +97,7 @@ class GlueCollector(BaseCollector):
             # Detect table format from input format
             table_format = self._detect_format(input_format, output_format)
 
-            return TableMetadata(
+            metadata = TableMetadata(
                 database=database,
                 table=table,
                 location=storage_desc.get("Location"),
@@ -69,6 +113,11 @@ class GlueCollector(BaseCollector):
                 storage_descriptor=storage_desc
             )
 
+            # Cache the result
+            self._metadata_cache.set(cache_key, metadata)
+
+            return metadata
+
         except ClientError as e:
             if e.response["Error"]["Code"] == "EntityNotFoundException":
                 raise ValueError(f"Table {database}.{table} not found") from e
@@ -77,7 +126,31 @@ class GlueCollector(BaseCollector):
     def get_partitions(
         self, database: str, table: str, max_partitions: int = 1000
     ) -> list[dict]:
-        """Get partition information for a table."""
+        """
+        Get partition information for a table with caching.
+
+        Results are cached for 2 minutes to reduce API calls to Glue.
+
+        Args:
+            database: Database name
+            table: Table name
+            max_partitions: Maximum number of partitions to fetch
+
+        Returns:
+            List of partition information dictionaries
+
+        Raises:
+            RuntimeError: If API call fails (returns [] if table has no partitions)
+        """
+        # Create cache key
+        cache_key = f"{database}.{table}.partitions"
+
+        # Try to get from cache
+        cached_partitions = self._partition_cache.get(cache_key)
+        if cached_partitions is not None:
+            return cached_partitions
+
+        # Not in cache, fetch from Glue
         try:
             paginator = self.client.get_paginator("get_partitions")
             page_iterator = paginator.paginate(
@@ -98,10 +171,15 @@ class GlueCollector(BaseCollector):
                     }
                     partitions.append(partition_info)
 
+            # Cache the result
+            self._partition_cache.set(cache_key, partitions)
+
             return partitions
 
         except ClientError as e:
             if e.response["Error"]["Code"] == "EntityNotFoundException":
+                # Cache empty result too
+                self._partition_cache.set(cache_key, [])
                 return []  # Table has no partitions
             raise RuntimeError(f"Failed to get partitions: {e}") from e
 
