@@ -5,6 +5,19 @@ from typing import Optional
 
 from .logging import get_logger
 from .sql_parser import extract_table_names
+from .constants import (
+    BYTES_PER_TB,
+    MIN_COST_MULTIPLIER,
+    MAX_COST_MULTIPLIER,
+    DEFAULT_MAX_PARTITIONS,
+    PERCENTAGE_MULTIPLIER,
+    SEVERITY_ORDER_CRITICAL,
+    SEVERITY_ORDER_HIGH,
+    SEVERITY_ORDER_MEDIUM,
+    SEVERITY_ORDER_LOW,
+    SEVERITY_ORDER_INFO,
+    SEVERITY_ORDER_DEFAULT,
+)
 from .models import (
     AnalysisResult,
     OptimizerConfig,
@@ -184,7 +197,7 @@ class OptimizationEngine:
         # Calculate cost from metrics if available
         if context.get("query_metrics"):
             metrics = context["query_metrics"]
-            data_scanned_tb = metrics.data_scanned_bytes / (1024 ** 4)
+            data_scanned_tb = metrics.data_scanned_bytes / BYTES_PER_TB
             metrics_based_cost = data_scanned_tb * self.config.athena_cost_per_tb
 
             # Use metrics-based cost if we don't have cost from recommendations
@@ -199,11 +212,11 @@ class OptimizationEngine:
                         max_savings_percentage = rec.savings_percentage
 
                 if max_savings_percentage > 0:
-                    total_optimized_cost = total_current_cost * (1 - max_savings_percentage / 100)
+                    total_optimized_cost = total_current_cost * (1 - max_savings_percentage / PERCENTAGE_MULTIPLIER)
                     total_savings = total_current_cost - total_optimized_cost
 
         total_savings_percentage = (
-            (total_savings / total_current_cost * 100)
+            (total_savings / total_current_cost * PERCENTAGE_MULTIPLIER)
             if total_current_cost > 0
             else 0.0
         )
@@ -263,12 +276,12 @@ class OptimizationEngine:
 
         # Estimate based on table sizes
         # Actual scan depends on partitions, projections, etc.
-        estimated_scan_tb = total_size_bytes / (1024 ** 4)
+        estimated_scan_tb = total_size_bytes / BYTES_PER_TB
         estimated_cost = estimated_scan_tb * self.config.athena_cost_per_tb
 
         # Provide range based on typical optimizations
-        min_cost = estimated_cost * 0.1  # With optimal partitioning and projection
-        max_cost = estimated_cost  # Full table scan
+        min_cost = estimated_cost * MIN_COST_MULTIPLIER  # With optimal partitioning and projection
+        max_cost = estimated_cost * MAX_COST_MULTIPLIER  # Full table scan
 
         return {
             "estimated_cost_usd": estimated_cost,
@@ -303,7 +316,7 @@ class OptimizationEngine:
         # Get partition info if partitioned
         partition_info = {}
         if metadata.partition_keys:
-            partitions = self.glue.get_partitions(database, table, max_partitions=100)
+            partitions = self.glue.get_partitions(database, table, max_partitions=DEFAULT_MAX_PARTITIONS)
             partition_info = {
                 "partition_keys": metadata.partition_keys,
                 "partition_count": len(partitions),
@@ -347,16 +360,16 @@ class OptimizationEngine:
     ) -> list[Recommendation]:
         """Sort recommendations by severity and confidence."""
         severity_order = {
-            Severity.CRITICAL: 0,
-            Severity.HIGH: 1,
-            Severity.MEDIUM: 2,
-            Severity.LOW: 3,
-            Severity.INFO: 4,
+            Severity.CRITICAL: SEVERITY_ORDER_CRITICAL,
+            Severity.HIGH: SEVERITY_ORDER_HIGH,
+            Severity.MEDIUM: SEVERITY_ORDER_MEDIUM,
+            Severity.LOW: SEVERITY_ORDER_LOW,
+            Severity.INFO: SEVERITY_ORDER_INFO,
         }
 
         return sorted(
             recommendations,
-            key=lambda r: (severity_order.get(r.severity, 999), -r.confidence)
+            key=lambda r: (severity_order.get(r.severity, SEVERITY_ORDER_DEFAULT), -r.confidence)
         )
 
     def _detect_format(self, input_format: str) -> str:

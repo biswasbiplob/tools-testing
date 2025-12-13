@@ -2,6 +2,14 @@
 
 from typing import Any
 
+from ..constants import (
+    BYTES_PER_TB,
+    HIGH_COST_THRESHOLD_USD,
+    MEDIUM_COST_THRESHOLD_USD,
+    CONFIDENCE_VERY_HIGH,
+    CONFIDENCE_MEDIUM_HIGH,
+    CONFIDENCE_MEDIUM,
+)
 from ..models import Recommendation, Severity, Category, Effort
 from .base import BaseAnalyzer
 
@@ -24,11 +32,11 @@ class CostAnalyzer(BaseAnalyzer):
             return recommendations
 
         # Calculate current cost
-        data_scanned_tb = metrics.data_scanned_bytes / (1024 ** 4)
+        data_scanned_tb = metrics.data_scanned_bytes / BYTES_PER_TB
         current_cost = data_scanned_tb * self.config.athena_cost_per_tb
 
         # High cost warning
-        if current_cost > 1.0:
+        if current_cost > HIGH_COST_THRESHOLD_USD:
             recommendations.append(Recommendation(
                 severity=Severity.HIGH,
                 category=Category.COST,
@@ -39,7 +47,7 @@ class CostAnalyzer(BaseAnalyzer):
                 ),
                 current_cost_usd=current_cost,
                 data_scanned_current_tb=data_scanned_tb,
-                confidence=1.0,
+                confidence=CONFIDENCE_VERY_HIGH,
                 effort=Effort.MEDIUM,
                 action_plan=[
                     "Review partition filters to reduce data scanned",
@@ -51,7 +59,7 @@ class CostAnalyzer(BaseAnalyzer):
                     "https://docs.aws.amazon.com/athena/latest/ug/performance-tuning.html"
                 ]
             ))
-        elif current_cost > 0.1:
+        elif current_cost > MEDIUM_COST_THRESHOLD_USD:
             recommendations.append(Recommendation(
                 severity=Severity.MEDIUM,
                 category=Category.COST,
@@ -62,7 +70,7 @@ class CostAnalyzer(BaseAnalyzer):
                 ),
                 current_cost_usd=current_cost,
                 data_scanned_current_tb=data_scanned_tb,
-                confidence=0.8,
+                confidence=CONFIDENCE_MEDIUM_HIGH,
                 effort=Effort.LOW,
                 action_plan=[
                     "Review if all selected columns are necessary",
@@ -87,7 +95,7 @@ class CostAnalyzer(BaseAnalyzer):
                             f"{', '.join(metadata.partition_keys)}. "
                             "Ensure partition filters are used to minimize costs."
                         ),
-                        confidence=0.7,
+                        confidence=CONFIDENCE_MEDIUM,
                         effort=Effort.LOW,
                         action_plan=[
                             f"Add WHERE clause filtering on {', '.join(metadata.partition_keys)}"
