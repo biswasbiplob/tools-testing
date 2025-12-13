@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from ..models import Recommendation, OptimizerConfig
+from ..types import AnalysisContext
 
 
 class BaseAnalyzer(ABC):
@@ -14,12 +15,12 @@ class BaseAnalyzer(ABC):
         self.config = config
 
     @abstractmethod
-    def analyze(self, context: dict[str, Any]) -> list[Recommendation]:
+    def analyze(self, context: AnalysisContext) -> list[Recommendation]:
         """
         Analyze the query and return recommendations.
 
         Args:
-            context: Analysis context containing query, metadata, etc.
+            context: Type-safe analysis context containing query, metadata, etc.
 
         Returns:
             List of recommendations

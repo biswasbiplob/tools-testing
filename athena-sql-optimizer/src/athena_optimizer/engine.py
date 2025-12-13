@@ -9,6 +9,7 @@ from .sql_parser import extract_table_names
 from .cost_calculator import CostCalculator
 from .metrics import get_metrics_collector
 from .parallel import execute_parallel
+from .types import AnalysisContext
 
 T = TypeVar('T')
 from .constants import (

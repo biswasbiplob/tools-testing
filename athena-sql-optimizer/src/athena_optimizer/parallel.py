@@ -1,12 +1,16 @@
 """Parallel execution utilities for AWS operations."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Any, Optional, Dict, List
+from typing import Callable, Any, Optional, Dict, List, TypeVar, Union
 import os
 
 from .logging import get_logger
 
 logger = get_logger(__name__)
+
+# Type variables for generic type hints
+T = TypeVar('T')  # Input type
+R = TypeVar('R')  # Result type
 
 
 def get_default_workers() -> int:
@@ -22,10 +26,10 @@ def get_default_workers() -> int:
 
 
 def execute_parallel(
-    tasks: Dict[str, Callable[[], Any]],
+    tasks: Dict[str, Callable[[], R]],
     max_workers: Optional[int] = None,
     fail_fast: bool = False
-) -> Dict[str, Any]:
+) -> Dict[str, Union[R, Exception]]:
     """
     Execute multiple tasks in parallel using a thread pool.
 
@@ -107,11 +111,11 @@ def execute_parallel(
 
 
 def execute_parallel_map(
-    items: List[Any],
-    func: Callable[[Any], Any],
+    items: List[T],
+    func: Callable[[T], R],
     max_workers: Optional[int] = None,
     fail_fast: bool = False
-) -> List[Any]:
+) -> List[Union[R, Exception]]:
     """
     Apply a function to items in parallel using a thread pool.
 
