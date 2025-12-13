@@ -2,25 +2,19 @@
 
 import time
 from typing import Optional
-import boto3
 from botocore.exceptions import ClientError
 
 from ..models import QueryMetrics, OptimizerConfig
+from .base import BaseCollector
 
 
-class AthenaCollector:
+class AthenaCollector(BaseCollector):
     """Collects query execution data from Athena."""
 
-    def __init__(self, config: OptimizerConfig):
-        """Initialize Athena collector."""
-        self.config = config
-
-        session_kwargs = {"region_name": config.region}
-        if config.aws_profile:
-            session_kwargs["profile_name"] = config.aws_profile
-
-        session = boto3.Session(**session_kwargs)
-        self.client = session.client("athena")
+    @property
+    def client_name(self) -> str:
+        """Return the AWS service name."""
+        return "athena"
 
     def execute_query(
         self,

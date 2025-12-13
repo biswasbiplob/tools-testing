@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 
 from athena_optimizer.engine import OptimizationEngine
+from athena_optimizer.sql_parser import extract_table_names
 from athena_optimizer.models import (
     OptimizerConfig,
     AnalysisResult,
@@ -85,29 +86,25 @@ class TestOptimizationEngine:
         assert result.query_metrics.data_scanned_bytes == 1099511627776
         assert result.total_current_cost_usd > 0
 
-    @patch('athena_optimizer.engine.GlueCollector')
-    @patch('athena_optimizer.engine.AthenaCollector')
-    def test_extract_table_names(self, mock_athena_cls, mock_glue_cls, optimizer_config):
+    def test_extract_table_names(self):
         """Test table name extraction from queries."""
-        engine = OptimizationEngine(optimizer_config)
-
         # Simple FROM
-        tables = engine._extract_table_names("SELECT * FROM test_table")
+        tables = extract_table_names("SELECT * FROM test_table")
         assert "test_table" in tables
 
         # Multiple tables with JOINs
-        tables = engine._extract_table_names(
+        tables = extract_table_names(
             "SELECT * FROM table1 JOIN table2 ON table1.id = table2.id"
         )
         assert "table1" in tables
         assert "table2" in tables
 
         # Database.table notation
-        tables = engine._extract_table_names("SELECT * FROM db.table")
+        tables = extract_table_names("SELECT * FROM db.table")
         assert "db.table" in tables
 
         # With comments
-        tables = engine._extract_table_names(
+        tables = extract_table_names(
             "-- Comment\nSELECT * FROM test_table /* inline comment */"
         )
         assert "test_table" in tables

@@ -20,6 +20,8 @@ class TestAthenaCollector:
         collector = AthenaCollector(optimizer_config)
 
         assert collector.config == optimizer_config
+        # Access client property to trigger lazy loading
+        _ = collector.client
         mock_session.assert_called_once()
 
     @patch('boto3.Session')
@@ -173,6 +175,8 @@ class TestGlueCollector:
         collector = GlueCollector(optimizer_config)
 
         assert collector.config == optimizer_config
+        # Access client property to trigger lazy loading
+        _ = collector.client
         mock_session.assert_called_once()
 
     @patch('boto3.Session')

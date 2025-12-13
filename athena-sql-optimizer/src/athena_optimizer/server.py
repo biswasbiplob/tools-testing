@@ -1,29 +1,42 @@
 """FastMCP server for Athena SQL optimization."""
 
 import json
+import threading
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
+from .decorators import mcp_tool_handler
+from .logging import get_logger
 from .models import OptimizerConfig
 from .engine import OptimizationEngine
+
+logger = get_logger(__name__)
 
 
 # Initialize FastMCP server
 mcp = FastMCP("athena-sql-optimizer")
 
 
-# Global engine instance (will be initialized with config)
-_engine: Optional[OptimizationEngine] = None
+# Thread-local storage for engine instances
+_thread_local = threading.local()
 
 
 def get_engine() -> OptimizationEngine:
-    """Get or create the optimization engine."""
-    global _engine
-    if _engine is None:
+    """
+    Get the optimization engine for the current thread.
+
+    Returns:
+        OptimizationEngine instance for this thread
+
+    Raises:
+        RuntimeError: If engine not initialized for this thread
+    """
+    engine = getattr(_thread_local, "engine", None)
+    if engine is None:
         raise RuntimeError(
             "Optimizer not initialized. Please check your MCP configuration."
         )
-    return _engine
+    return engine
 
 
 def initialize_engine(
@@ -37,9 +50,26 @@ def initialize_engine(
     athena_cost_per_tb: float = 5.0,
     timeout_seconds: int = 300
 ) -> None:
-    """Initialize the optimization engine with configuration."""
-    global _engine
+    """
+    Initialize the optimization engine with configuration for the current thread.
 
+    This function creates a thread-local engine instance, ensuring thread-safety
+    in multi-threaded environments.
+
+    Args:
+        aws_profile: AWS credentials profile name
+        region: AWS region (default: eu-west-1)
+        workgroup: Athena workgroup name (required)
+        s3_output_location: S3 location for query results (required)
+        catalog: Glue catalog name (default: AwsDataCatalog)
+        database: Default database name
+        run_explain_analyze: Whether to run EXPLAIN ANALYZE by default
+        athena_cost_per_tb: Cost per TB of data scanned (default: 5.0 USD)
+        timeout_seconds: Query timeout in seconds (default: 300)
+
+    Raises:
+        ValueError: If required parameters are missing
+    """
     # Validate required parameters
     if not workgroup:
         raise ValueError("workgroup parameter is required")
@@ -58,15 +88,22 @@ def initialize_engine(
         timeout_seconds=timeout_seconds
     )
 
-    _engine = OptimizationEngine(config)
+    _thread_local.engine = OptimizationEngine(config)
+    logger.info(
+        "engine_initialized",
+        region=region,
+        workgroup=workgroup,
+        database=database,
+    )
 
 
 @mcp.tool()
+@mcp_tool_handler
 def analyze_sql_query(
     query: str,
     database: Optional[str] = None,
     run_explain_analyze: Optional[bool] = None
-) -> str:
+) -> dict:
     """
     Analyze an Athena SQL query for performance and cost optimization.
 
@@ -86,26 +123,16 @@ def analyze_sql_query(
     Returns:
         JSON string with detailed analysis results and recommendations
     """
-    try:
-        engine = get_engine()
-        result = engine.analyze_query(query, database, run_explain_analyze)
-
-        # Convert to dict for JSON serialization
-        return json.dumps(result.model_dump(), indent=2, default=str)
-
-    except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "query": query,
-            "status": "failed"
-        }, indent=2)
+    engine = get_engine()
+    return engine.analyze_query(query, database, run_explain_analyze)
 
 
 @mcp.tool()
+@mcp_tool_handler
 def estimate_query_cost(
     query: str,
     database: Optional[str] = None
-) -> str:
+) -> dict:
     """
     Estimate the cost of running a query without executing it.
 
@@ -119,25 +146,16 @@ def estimate_query_cost(
     Returns:
         JSON string with cost estimation details
     """
-    try:
-        engine = get_engine()
-        result = engine.estimate_cost(query, database)
-
-        return json.dumps(result, indent=2, default=str)
-
-    except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "query": query,
-            "status": "failed"
-        }, indent=2)
+    engine = get_engine()
+    return engine.estimate_cost(query, database)
 
 
 @mcp.tool()
+@mcp_tool_handler
 def check_table_health(
     database: str,
     table: str
-) -> str:
+) -> dict:
     """
     Analyze table structure, format, and health.
 
@@ -155,19 +173,8 @@ def check_table_health(
     Returns:
         JSON string with table health report
     """
-    try:
-        engine = get_engine()
-        result = engine.check_table_health(database, table)
-
-        return json.dumps(result, indent=2, default=str)
-
-    except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "database": database,
-            "table": table,
-            "status": "failed"
-        }, indent=2)
+    engine = get_engine()
+    return engine.check_table_health(database, table)
 
 
 # Allow initialization via environment or config
@@ -184,7 +191,7 @@ def main():
             config_dict = json.loads(config_json)
             initialize_engine(**config_dict)
         except Exception as e:
-            print(f"Error parsing config: {e}", file=sys.stderr)
+            logger.error("failed_to_parse_config", error=str(e))
             sys.exit(1)
     else:
         # Try to initialize from environment variables
@@ -201,8 +208,11 @@ def main():
                 timeout_seconds=int(os.getenv("TIMEOUT_SECONDS", "300"))
             )
         except Exception as e:
-            print(f"Error initializing from environment: {e}", file=sys.stderr)
-            print("Required: ATHENA_WORKGROUP, ATHENA_S3_OUTPUT", file=sys.stderr)
+            logger.error(
+                "failed_to_initialize_from_environment",
+                error=str(e),
+                required_vars=["ATHENA_WORKGROUP", "ATHENA_S3_OUTPUT"],
+            )
             sys.exit(1)
 
     # Run the MCP server

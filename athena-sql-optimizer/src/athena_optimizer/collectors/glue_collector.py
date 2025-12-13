@@ -1,25 +1,19 @@
 """Glue Data Catalog collector for table metadata."""
 
 from typing import Optional
-import boto3
 from botocore.exceptions import ClientError
 
 from ..models import TableMetadata, OptimizerConfig
+from .base import BaseCollector
 
 
-class GlueCollector:
+class GlueCollector(BaseCollector):
     """Collects table metadata from Glue Data Catalog."""
 
-    def __init__(self, config: OptimizerConfig):
-        """Initialize Glue collector."""
-        self.config = config
-
-        session_kwargs = {"region_name": config.region}
-        if config.aws_profile:
-            session_kwargs["profile_name"] = config.aws_profile
-
-        session = boto3.Session(**session_kwargs)
-        self.client = session.client("glue")
+    @property
+    def client_name(self) -> str:
+        """Return the AWS service name."""
+        return "glue"
 
     def get_table_metadata(
         self, database: str, table: str, catalog: Optional[str] = None

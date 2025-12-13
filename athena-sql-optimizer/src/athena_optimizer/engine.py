@@ -1,9 +1,10 @@
 """Recommendation engine that orchestrates analyzers and computes optimizations."""
 
-import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from .logging import get_logger
+from .sql_parser import extract_table_names
 from .models import (
     AnalysisResult,
     OptimizerConfig,
@@ -21,6 +22,8 @@ from .analyzers import (
     ProjectionAnalyzer,
 )
 
+logger = get_logger(__name__)
+
 
 class OptimizationEngine:
     """Main engine that orchestrates analysis and generates recommendations."""
@@ -30,6 +33,7 @@ class OptimizationEngine:
         self.config = config
         self.athena = AthenaCollector(config)
         self.glue = GlueCollector(config)
+        self._closed = False
 
         # Initialize all analyzers
         self.analyzers = [
@@ -40,6 +44,29 @@ class OptimizationEngine:
             ProjectionAnalyzer(config),
             CostAnalyzer(config),  # Cost analyzer should run last
         ]
+
+    def close(self):
+        """Clean up all resources."""
+        if not self._closed:
+            self.athena.close()
+            self.glue.close()
+            self._closed = True
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
+        return False
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        try:
+            self.close()
+        except:
+            pass  # Ignore errors in __del__
 
     def analyze_query(
         self,
@@ -70,8 +97,8 @@ class OptimizationEngine:
             "explain_analyze_plan": None,
         }
 
-        # Extract table names from query
-        table_names = self._extract_table_names(query)
+        # Extract table names from query using proper SQL parsing
+        table_names = extract_table_names(query)
 
         # Collect table metadata
         for table_name in table_names:
@@ -87,14 +114,23 @@ class OptimizationEngine:
                     context["table_metadata"][table_name] = metadata
             except Exception as e:
                 # Table might not exist or access denied - continue anyway
-                print(f"Warning: Could not fetch metadata for {table_name}: {e}")
+                logger.warning(
+                    "failed_to_fetch_table_metadata",
+                    table_name=table_name,
+                    database=table_db,
+                    error=str(e),
+                )
 
         # Get EXPLAIN plan
         try:
             explain_plan = self.athena.get_explain_plan(query, db)
             context["explain_plan"] = explain_plan
         except Exception as e:
-            print(f"Warning: Could not get EXPLAIN plan: {e}")
+            logger.warning(
+                "failed_to_get_explain_plan",
+                database=db,
+                error=str(e),
+            )
 
         # Optionally run EXPLAIN ANALYZE
         should_run_analyze = (
@@ -109,7 +145,11 @@ class OptimizationEngine:
                 context["explain_analyze_plan"] = analyze_plan
                 context["query_metrics"] = metrics
             except Exception as e:
-                print(f"Warning: Could not run EXPLAIN ANALYZE: {e}")
+                logger.warning(
+                    "failed_to_run_explain_analyze",
+                    database=db,
+                    error=str(e),
+                )
 
         # Run all analyzers
         all_recommendations = []
@@ -119,7 +159,11 @@ class OptimizationEngine:
                     recommendations = analyzer.analyze(context)
                     all_recommendations.extend(recommendations)
                 except Exception as e:
-                    print(f"Warning: Analyzer {analyzer.name} failed: {e}")
+                    logger.warning(
+                        "analyzer_failed",
+                        analyzer_name=analyzer.name,
+                        error=str(e),
+                    )
 
         # Sort recommendations by severity and confidence
         sorted_recommendations = self._sort_recommendations(all_recommendations)
@@ -196,7 +240,7 @@ class OptimizationEngine:
             Cost estimation with breakdown
         """
         db = database or self.config.database
-        table_names = self._extract_table_names(query)
+        table_names = extract_table_names(query)
 
         total_size_bytes = 0
         table_sizes = {}
@@ -297,27 +341,6 @@ class OptimizationEngine:
             "recommendations": recommendations,
             "metadata": metadata.model_dump()
         }
-
-    def _extract_table_names(self, query: str) -> list[str]:
-        """Extract table names from SQL query."""
-        # Remove comments
-        query = re.sub(r'--[^\n]*', '', query)
-        query = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
-
-        # Pattern to match FROM and JOIN clauses
-        pattern = r'\b(?:FROM|JOIN)\s+([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)'
-
-        matches = re.finditer(pattern, query, re.IGNORECASE)
-        tables = []
-
-        for match in matches:
-            table = match.group(1)
-            # Remove alias if present
-            table = table.split()[0]
-            if table.lower() not in ['select', 'where', 'group', 'order', 'limit']:
-                tables.append(table)
-
-        return list(set(tables))  # Remove duplicates
 
     def _sort_recommendations(
         self, recommendations: list[Recommendation]
